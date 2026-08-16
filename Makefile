@@ -91,6 +91,9 @@ sim_regfile:
 sim_csr:
 	iverilog -g2012 -o sim_csr.vvp \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/csr_file.sv \
 		tb/core/tb_csr.sv
 	vvp sim_csr.vvp
@@ -100,6 +103,9 @@ sim_cpu:
 	iverilog -g2012 -o sim_cpu.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -116,6 +122,9 @@ sim_cpu_regression:
 	iverilog -g2012 -o sim_cpu_regression.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -132,6 +141,9 @@ sim_cpu_csr:
 	iverilog -g2012 -o sim_cpu_csr.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -197,6 +209,9 @@ sim_soc_decode:
 	iverilog -g2012 -o sim_soc_decode.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -221,6 +236,9 @@ sim_cpu_exceptions:
 	iverilog -g2012 -o sim_cpu_exceptions.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -240,6 +258,9 @@ sim_sva: compile_isa_diag
 	iverilog -g2012 -o sim_sva.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -273,6 +294,9 @@ RV32UM_TESTS = div divu mul mulh mulhsu mulhu rem remu
 RISCV_RTL_SRCS = \
 	rtl/core/alu_ops.sv \
 	rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 	rtl/core/alu.sv \
 	rtl/core/mdu.sv \
 	rtl/core/register_file.sv \
@@ -361,6 +385,9 @@ sim_cpu_isa: compile_isa_diag
 	iverilog -g2012 -o sim_cpu_isa.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -395,6 +422,9 @@ sim_soc_diag: compile_soc_diag
 	iverilog -g2012 -o sim_soc_diag.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -437,6 +467,9 @@ sim_calculator: compile_calculator
 	iverilog -g2012 -o sim_calculator.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -477,6 +510,9 @@ sim_benchmark: compile_benchmark
 	iverilog -g2012 -o sim_benchmark.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \
@@ -538,6 +574,9 @@ sim_irq_demo: compile_irq_demo_sim
 	iverilog -g2012 -o sim_irq_demo.vvp \
 		rtl/core/alu_ops.sv \
 		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
 		rtl/core/alu.sv \
 		rtl/core/mdu.sv \
 		rtl/core/register_file.sv \

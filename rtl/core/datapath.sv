@@ -94,7 +94,7 @@ module datapath #(
     logic [15:0] load_half_assembled;
     logic [31:0] load_word_assembled;
     logic [31:0] load_data_formatted;
-    logic [31:0] dmem_data_buf;        // buffers first word for cross-boundary loads
+    logic [31:0] dmem_data_buf;// buffers first word for cross-boundary loads
 
     // CSR interface signals
     logic [31:0] csr_rdata;
@@ -103,28 +103,269 @@ module datapath #(
     logic [31:0] csr_wdata;
     logic [1:0]  csr_op;
     logic [31:0] trap_val;
+    logic pipe_if_id_en;
+
+    logic pipe_id_ex_en;
+    logic pipe_ex_mem_en;
+    logic pipe_mem_wb_en;
+    logic hold_pc;
+    logic hold_if_id;
+    logic bubble_id_ex;
+    logic flush_if_id;
+    logic flush_id_ex;
+    logic [1:0] forward_a;
+    logic [1:0] forward_b;
+
+    logic [31:0] forwarded_rs1_data;
+    logic [31:0] forwarded_rs2_data;
+    logic [31:0] mem_wb_forward_data;
+
+    logic [31:0] pipe_alu_operand_a;
+    logic [31:0] pipe_alu_operand_b;
+
+    logic [31:0] pipe_alu_result;
+    logic        pipe_alu_zero;
+
+    logic [31:0] fetch_pc_q;
+    logic [31:0] fetch_pc_plus4_q;
 
     // --------------------------------------------------------
-    // Instruction register
+    // Fetch request PC tracking
+    // IMEM is synchronous, so imem_data belongs to the address
+    // presented during the previous cycle.
     // --------------------------------------------------------
-    logic [31:0] instr_reg;
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            fetch_pc_q       <= PC_RESET;
+            fetch_pc_plus4_q <= PC_RESET + 32'd4;
+        end
+        else begin
+            fetch_pc_q       <= pc;
+            fetch_pc_plus4_q <= pc_plus4;
+        end
+    end
+    // --------------------------------------------------------
+    // IF/ID pipeline register
+    // --------------------------------------------------------
+    logic        if_id_valid;
+    logic [31:0] if_id_pc;
+    logic [31:0] if_id_pc_plus4;
+    logic [31:0] if_id_instruction;
+
 
     always_ff @(posedge clk) begin
-        if (!rst_n)
-            instr_reg <= 32'b0;
-        else if (instr_latch_en)
-            instr_reg <= imem_data;
+        if (!rst_n) begin
+            if_id_valid       <= 1'b0;
+            if_id_pc          <= 32'b0;
+            if_id_pc_plus4    <= 32'b0;
+            if_id_instruction <= 32'b0;
+        end
+       else if (instr_latch_en) begin
+        if_id_valid       <= 1'b1;
+        if_id_pc          <= fetch_pc_q;
+        if_id_pc_plus4    <= fetch_pc_plus4_q;
+        if_id_instruction <= imem_data;
+    end
     end
 
-    assign instruction = instr_reg;
+    // --------------------------------------------------------
+    // ID/EX pipeline register
+    // --------------------------------------------------------
+    logic        id_ex_valid;
+    logic [31:0] id_ex_instruction;
+    logic [31:0] id_ex_pc;
+    logic [31:0] id_ex_pc_plus4;
+    logic [31:0] id_ex_rs1_data;
+    logic [31:0] id_ex_rs2_data;
+    logic [31:0] id_ex_imm;
+    logic [4:0]  id_ex_rs1;
+    logic [4:0]  id_ex_rs2;
+    logic [4:0]  id_ex_rd;
+    logic [2:0]  id_ex_funct3;
+    logic [4:0] id_ex_alu_operation;
+    logic [1:0] id_ex_alu_src_a_sel;
+    logic       id_ex_alu_src_b;
+    logic       id_ex_reg_write;
+    logic       id_ex_mem_read;
+    logic       id_ex_mem_write;
+    logic       id_ex_mem_to_reg;
+    logic       id_ex_jump;
+    logic [4:0]  dec_alu_operation;
+    logic [1:0]  dec_alu_src_a_sel;
+    logic        dec_alu_src_b;
+    logic        dec_reg_write;
+    logic        dec_mem_read;
+    logic        dec_mem_write;
+    logic        dec_mem_to_reg;
+    logic        dec_jump;
+    logic        dec_uses_rs1;
+    logic        dec_uses_rs2;
+    logic        dec_mdu_en;
+    logic        dec_illegal_instruction;
+    logic        load_use_hazard;
+
+    assign load_use_hazard =
+    id_ex_valid &&
+    id_ex_mem_read &&
+    (id_ex_rd != 5'd0) &&
+    (
+        (dec_uses_rs1 && (id_ex_rd == rs1)) ||
+        (dec_uses_rs2 && (id_ex_rd == rs2))
+    );
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            id_ex_valid         <= 1'b0;
+            id_ex_instruction   <= 32'b0;
+            id_ex_pc            <= 32'b0;
+            id_ex_pc_plus4      <= 32'b0;
+            id_ex_rs1_data      <= 32'b0;
+            id_ex_rs2_data      <= 32'b0;
+            id_ex_imm           <= 32'b0;
+            id_ex_rs1           <= 5'b0;
+            id_ex_rs2           <= 5'b0;
+            id_ex_rd            <= 5'b0;
+            id_ex_funct3        <= 3'b0;
+
+            id_ex_alu_operation <= 5'b0;
+            id_ex_alu_src_a_sel <= 2'b0;
+            id_ex_alu_src_b     <= 1'b0;
+            id_ex_reg_write     <= 1'b0;
+            id_ex_mem_read      <= 1'b0;
+            id_ex_mem_write     <= 1'b0;
+            id_ex_mem_to_reg    <= 1'b0;
+            id_ex_jump          <= 1'b0;
+        end
+        else if (instr_latch_en) begin
+            id_ex_valid         <= if_id_valid;
+            id_ex_instruction   <= if_id_instruction;
+            id_ex_pc            <= if_id_pc;
+            id_ex_pc_plus4      <= if_id_pc_plus4;
+            id_ex_rs1_data      <= rs1_data;
+            id_ex_rs2_data      <= rs2_data;
+            id_ex_imm           <= imm;
+            id_ex_rs1           <= rs1;
+            id_ex_rs2           <= rs2;
+            id_ex_rd            <= rd;
+            id_ex_funct3        <= funct3;
+
+            id_ex_alu_operation <= dec_alu_operation;
+            id_ex_alu_src_a_sel <= dec_alu_src_a_sel;
+            id_ex_alu_src_b     <= dec_alu_src_b;
+            id_ex_reg_write     <= dec_reg_write;
+            id_ex_mem_read      <= dec_mem_read;
+            id_ex_mem_write     <= dec_mem_write;
+            id_ex_mem_to_reg    <= dec_mem_to_reg;
+            id_ex_jump          <= dec_jump;
+        end
+    end
+
+    // --------------------------------------------------------
+    // EX/MEM pipeline register
+    // --------------------------------------------------------
+    logic        ex_mem_valid;
+    logic [31:0] ex_mem_instruction;
+    logic [31:0] ex_mem_pc_plus4;
+    logic [31:0] ex_mem_alu_result;
+    logic [31:0] ex_mem_rs2_data;
+    logic [4:0]  ex_mem_rd;
+    logic [2:0]  ex_mem_funct3;
+
+    logic        ex_mem_reg_write;
+    logic        ex_mem_mem_read;
+    logic        ex_mem_mem_write;
+    logic        ex_mem_mem_to_reg;
+    logic        ex_mem_jump;
+
+
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            ex_mem_valid       <= 1'b0;
+            ex_mem_instruction <= 32'b0;
+            ex_mem_pc_plus4    <= 32'b0;
+            ex_mem_alu_result  <= 32'b0;
+            ex_mem_rs2_data    <= 32'b0;
+            ex_mem_rd          <= 5'b0;
+            ex_mem_funct3      <= 3'b0;
+
+            ex_mem_reg_write   <= 1'b0;
+            ex_mem_mem_read    <= 1'b0;
+            ex_mem_mem_write   <= 1'b0;
+            ex_mem_mem_to_reg  <= 1'b0;
+            ex_mem_jump        <= 1'b0;
+        end
+        else if (alu_reg_en) begin
+            ex_mem_valid       <= id_ex_valid;
+            ex_mem_instruction <= id_ex_instruction;
+            ex_mem_pc_plus4    <= id_ex_pc_plus4;
+            ex_mem_alu_result <= pipe_alu_result;
+            ex_mem_rs2_data <= forwarded_rs2_data;
+            ex_mem_rd          <= id_ex_rd;
+            ex_mem_funct3      <= id_ex_funct3;
+
+            ex_mem_reg_write   <= id_ex_reg_write;
+            ex_mem_mem_read    <= id_ex_mem_read;
+            ex_mem_mem_write   <= id_ex_mem_write;
+            ex_mem_mem_to_reg  <= id_ex_mem_to_reg;
+            ex_mem_jump        <= id_ex_jump;
+        end
+    end
+        // --------------------------------------------------------
+    // MEM/WB pipeline register
+    // --------------------------------------------------------
+    logic        mem_wb_valid;
+    logic [31:0] mem_wb_instruction;
+    logic [31:0] mem_wb_pc_plus4;
+    logic [31:0] mem_wb_alu_result;
+    logic [31:0] mem_wb_mem_data;
+    logic [4:0]  mem_wb_rd;
+    logic [2:0]  mem_wb_funct3;
+
+    logic        mem_wb_reg_write;
+    logic        mem_wb_mem_to_reg;
+    logic        mem_wb_jump;
+
+    assign instruction = if_id_instruction;
+    always_ff @(posedge clk) begin
+    if (!rst_n) begin
+        mem_wb_valid       <= 1'b0;
+        mem_wb_instruction <= 32'b0;
+        mem_wb_pc_plus4    <= 32'b0;
+        mem_wb_alu_result  <= 32'b0;
+        mem_wb_mem_data    <= 32'b0;
+        mem_wb_rd          <= 5'b0;
+        mem_wb_funct3      <= 3'b0;
+
+        mem_wb_reg_write   <= 1'b0;
+        mem_wb_mem_to_reg  <= 1'b0;
+        mem_wb_jump        <= 1'b0;
+    end
+    else if (pipe_mem_wb_en) begin
+        mem_wb_valid       <= ex_mem_valid;
+        mem_wb_instruction <= ex_mem_instruction;
+        mem_wb_pc_plus4    <= ex_mem_pc_plus4;
+        mem_wb_alu_result  <= ex_mem_alu_result;
+
+        // Load data timing will be handled separately.
+        mem_wb_mem_data    <= dmem_read_data;
+
+        mem_wb_rd          <= ex_mem_rd;
+        mem_wb_funct3      <= ex_mem_funct3;
+
+        mem_wb_reg_write   <= ex_mem_reg_write;
+        mem_wb_mem_to_reg  <= ex_mem_mem_to_reg;
+        mem_wb_jump        <= ex_mem_jump;
+    end
+end
 
     // --------------------------------------------------------
     // Instruction field extraction
     // --------------------------------------------------------
-    assign rs1    = instr_reg[19:15];
-    assign rs2    = instr_reg[24:20];
-    assign rd     = instr_reg[11:7];
-    assign funct3 = instr_reg[14:12];
+    assign rs1    = if_id_instruction[19:15];
+    assign rs2    = if_id_instruction[24:20];
+    assign rd     = if_id_instruction[11:7];
+    assign funct3 = if_id_instruction[14:12];
 
     // --------------------------------------------------------
     // ALU result / MDU result register
@@ -191,11 +432,97 @@ module datapath #(
     // --------------------------------------------------------
     // Submodule instantiations
     // --------------------------------------------------------
+    pipeline_decode u_pipeline_decode (
+    .instruction         (if_id_instruction),
 
+    .alu_operation       (dec_alu_operation),
+    .alu_src_a_sel       (dec_alu_src_a_sel),
+    .alu_src_b           (dec_alu_src_b),
+
+    .reg_write           (dec_reg_write),
+    .mem_read            (dec_mem_read),
+    .mem_write           (dec_mem_write),
+    .mem_to_reg          (dec_mem_to_reg),
+    .jump                (dec_jump),
+
+    .uses_rs1            (dec_uses_rs1),
+    .uses_rs2            (dec_uses_rs2),
+
+    .mdu_en               (dec_mdu_en),
+    .illegal_instruction (dec_illegal_instruction)
+);
+
+    pipeline_control u_pipeline_control (
+    .clk             (clk),
+    .rst_n           (rst_n),
+
+    .if_id_valid     (if_id_valid),
+    .id_ex_valid     (id_ex_valid),
+    .ex_mem_valid    (ex_mem_valid),
+    .mem_wb_valid    (mem_wb_valid),
+
+    .load_use_hazard (load_use_hazard),
+
+    // Temporary connections.
+    // Real MEM/MDU busy and redirect logic will be connected later.
+    .mem_busy        (1'b0),
+    .mdu_busy        (1'b0),
+    .redirect_valid  (1'b0),
+
+    .pipe_if_id_en   (pipe_if_id_en),
+    .pipe_id_ex_en   (pipe_id_ex_en),
+    .pipe_ex_mem_en  (pipe_ex_mem_en),
+    .pipe_mem_wb_en  (pipe_mem_wb_en),
+
+    .hold_pc         (hold_pc),
+    .hold_if_id      (hold_if_id),
+    .bubble_id_ex    (bubble_id_ex),
+    .flush_if_id     (flush_if_id),
+    .flush_id_ex     (flush_id_ex)
+);
+    forwarding_unit u_forwarding_unit (
+    .id_ex_rs1        (id_ex_rs1),
+    .id_ex_rs2        (id_ex_rs2),
+
+    .ex_mem_valid     (ex_mem_valid),
+    .ex_mem_reg_write (ex_mem_reg_write),
+    .ex_mem_rd        (ex_mem_rd),
+
+    .mem_wb_valid     (mem_wb_valid),
+    .mem_wb_reg_write (mem_wb_reg_write),
+    .mem_wb_rd        (mem_wb_rd),
+
+    .forward_a        (forward_a),
+    .forward_b        (forward_b)
+);
+
+    // --------------------------------------------------------
+// Forwarding data selection
+// --------------------------------------------------------
+
+// Value produced by the instruction in MEM/WB.
+assign mem_wb_forward_data =
+    mem_wb_mem_to_reg ? mem_wb_mem_data :
+    mem_wb_jump       ? mem_wb_pc_plus4 :
+                        mem_wb_alu_result;
+
+always @(*) begin
+    case (forward_a)
+        2'b10:   forwarded_rs1_data = ex_mem_alu_result;
+        2'b01:   forwarded_rs1_data = mem_wb_forward_data;
+        default: forwarded_rs1_data = id_ex_rs1_data;
+    endcase
+
+    case (forward_b)
+        2'b10:   forwarded_rs2_data = ex_mem_alu_result;
+        2'b01:   forwarded_rs2_data = mem_wb_forward_data;
+        default: forwarded_rs2_data = id_ex_rs2_data;
+    endcase
+end
     imm_gen u_imm_gen (
-        .instruction (instr_reg),
-        .imm_out     (imm)
-    );
+    .instruction (if_id_instruction),
+    .imm_out     (imm)
+);
 
     register_file u_register_file (
         .clk          (clk),
@@ -209,14 +536,16 @@ module datapath #(
     );
 
     always @(*) begin
-        case (alu_src_a_sel)
-            2'b01:   alu_operand_a = pc;
-            2'b10:   alu_operand_a = 32'b0;
-            default: alu_operand_a = rs1_data;
-        endcase
-    end
+    case (alu_src_a_sel)
+        2'b01:   alu_operand_a = pc;
+        2'b10:   alu_operand_a = 32'b0;
+        default: alu_operand_a = rs1_data;
+    endcase
+end
 
-    assign alu_operand_b = alu_src_b ? imm : rs2_data;
+assign alu_operand_b = alu_src_b ? imm : rs2_data;
+
+
 
     alu u_alu (
         .operation (alu_operation),
@@ -240,7 +569,7 @@ module datapath #(
 
     // CSR write data: rs1_data for register variants (funct3[2]=0),
     // zero-extended zimm for immediate variants (funct3[2]=1).
-    assign csr_wdata = funct3[2] ? {27'b0, instr_reg[19:15]} : rs1_data;
+    assign csr_wdata = funct3[2] ? {27'b0, if_id_instruction[19:15]} : rs1_data;
 
     // CSR operation encoding from funct3[1:0]:
     //   01 (CSRRW/CSRRWI) → 00 (overwrite)
@@ -254,6 +583,30 @@ module datapath #(
         endcase
     end
 
+        // --------------------------------------------------------
+    // Pipeline EX operand selection
+    // --------------------------------------------------------
+    always @(*) begin
+        case (id_ex_alu_src_a_sel)
+            2'b01:   pipe_alu_operand_a = id_ex_pc;
+            2'b10:   pipe_alu_operand_a = 32'b0;
+            default: pipe_alu_operand_a = forwarded_rs1_data;
+        endcase
+    end
+
+    assign pipe_alu_operand_b =
+        id_ex_alu_src_b ? id_ex_imm : forwarded_rs2_data;
+
+    // --------------------------------------------------------
+    // Pipeline EX ALU
+    // --------------------------------------------------------
+    alu u_pipe_alu (
+        .operation (id_ex_alu_operation),
+        .operand_a (pipe_alu_operand_a),
+        .operand_b (pipe_alu_operand_b),
+        .result    (pipe_alu_result),
+        .zero      (pipe_alu_zero)
+    );
     // --------------------------------------------------------
     // Cross-word-boundary detection (combinational from ALU result)
     // Asserts when a load/store spans two words and needs STATE_MEMORY2.
@@ -274,7 +627,7 @@ module datapath #(
     logic [31:0] fetch_target;
 
     always @(*) begin
-        if (instr_reg[6:0] == OP_JALR) begin
+        if (if_id_instruction[6:0] == OP_JALR) begin
             fetch_target          = (rs1_data + imm) & ~32'b1;
             fetch_addr_misaligned = fetch_target[1];
         end else begin                          // OP_B, OP_JAL
@@ -291,7 +644,7 @@ module datapath #(
             EXC_FETCH_MISALIGN:              trap_val = fetch_target;    // misaligned jump/branch target
             EXC_LOAD_MISALIGN,
             EXC_STORE_MISALIGN:              trap_val = alu_result_reg;  // faulting effective address
-            EXC_ILLEGAL_INSTR:               trap_val = instr_reg;       // offending instruction word
+            EXC_ILLEGAL_INSTR:               trap_val = if_id_instruction;       // offending instruction word
             default:                         trap_val = 32'b0;
         endcase
     end
@@ -305,7 +658,7 @@ module datapath #(
         .trap_val         (trap_val),
         .trap_pc          (pc),
         .irq_m_timer      (irq_m_timer),
-        .csr_addr         (instr_reg[31:20]),
+        .csr_addr         (if_id_instruction[31:20]),
         .csr_wdata        (csr_wdata),
         .csr_op           (csr_op),
         .csr_write_en     (csr_write_en),

@@ -129,21 +129,63 @@ module datapath #(
     logic [31:0] fetch_pc_q;
     logic [31:0] fetch_pc_plus4_q;
 
+    logic        fetch_hold_valid;
+    logic [31:0] fetch_hold_pc;
+    logic [31:0] fetch_hold_pc_plus4;
+    logic [31:0] fetch_hold_instruction;
+
+    localparam logic PIPELINE_ACTIVE = 1'b1;
+    logic        pipe_branch_taken;
+    logic        pipe_redirect_valid;
+    logic [31:0] pipe_redirect_target;
+
+    logic        rf_write_enable;
+    logic [4:0]  rf_write_addr;
+    logic [31:0] rf_write_data;
+
+    logic [31:0] mem_stage_addr;
+    logic [31:0] mem_stage_store_data;
+    logic [2:0]  mem_stage_funct3;
+    logic        mem_stage_read;
+    logic        mem_stage_write;
+    logic mem_load_wait;
+    logic pipe_mem_busy;
+
     // --------------------------------------------------------
     // Fetch request PC tracking
     // IMEM is synchronous, so imem_data belongs to the address
     // presented during the previous cycle.
     // --------------------------------------------------------
     always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            fetch_pc_q       <= PC_RESET;
-            fetch_pc_plus4_q <= PC_RESET + 32'd4;
+    if (!rst_n) begin
+        fetch_pc_q               <= PC_RESET;
+        fetch_pc_plus4_q         <= PC_RESET + 32'd4;
+
+        fetch_hold_valid         <= 1'b0;
+        fetch_hold_pc            <= 32'b0;
+        fetch_hold_pc_plus4      <= 32'b0;
+        fetch_hold_instruction   <= 32'b0;
+    end
+    else begin
+        fetch_pc_q       <= pc;
+        fetch_pc_plus4_q <= pc_plus4;
+
+        // A synchronous IMEM response may arrive while IF/ID is
+        // stalled. Preserve that response instead of losing it.
+        if (flush_if_id) begin
+            fetch_hold_valid <= 1'b0;
         end
-        else begin
-            fetch_pc_q       <= pc;
-            fetch_pc_plus4_q <= pc_plus4;
+        else if (hold_if_id && !fetch_hold_valid) begin
+            fetch_hold_valid       <= 1'b1;
+            fetch_hold_pc          <= fetch_pc_q;
+            fetch_hold_pc_plus4    <= fetch_pc_plus4_q;
+            fetch_hold_instruction <= imem_data;
+        end
+        else if (!hold_if_id && pipe_if_id_en && fetch_hold_valid) begin
+            fetch_hold_valid <= 1'b0;
         end
     end
+end
     // --------------------------------------------------------
     // IF/ID pipeline register
     // --------------------------------------------------------
@@ -153,20 +195,42 @@ module datapath #(
     logic [31:0] if_id_instruction;
 
 
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
+   always_ff @(posedge clk) begin
+    if (!rst_n) begin
+        if_id_valid       <= 1'b0;
+        if_id_pc          <= 32'b0;
+        if_id_pc_plus4    <= 32'b0;
+        if_id_instruction <= 32'b0;
+    end
+    else if (PIPELINE_ACTIVE) begin
+        if (flush_if_id) begin
             if_id_valid       <= 1'b0;
             if_id_pc          <= 32'b0;
             if_id_pc_plus4    <= 32'b0;
             if_id_instruction <= 32'b0;
         end
-       else if (instr_latch_en) begin
+        else if (pipe_if_id_en && !hold_if_id) begin
+    if (fetch_hold_valid) begin
+        if_id_valid       <= 1'b1;
+        if_id_pc          <= fetch_hold_pc;
+        if_id_pc_plus4    <= fetch_hold_pc_plus4;
+        if_id_instruction <= fetch_hold_instruction;
+    end
+    else begin
         if_id_valid       <= 1'b1;
         if_id_pc          <= fetch_pc_q;
         if_id_pc_plus4    <= fetch_pc_plus4_q;
         if_id_instruction <= imem_data;
     end
+end
     end
+    else if (instr_latch_en) begin
+        if_id_valid       <= 1'b1;
+        if_id_pc          <= fetch_pc_q;
+        if_id_pc_plus4    <= fetch_pc_plus4_q;
+        if_id_instruction <= imem_data;
+    end
+end
 
     // --------------------------------------------------------
     // ID/EX pipeline register
@@ -212,9 +276,34 @@ module datapath #(
         (dec_uses_rs1 && (id_ex_rd == rs1)) ||
         (dec_uses_rs2 && (id_ex_rd == rs2))
     );
+always_ff @(posedge clk) begin
+    if (!rst_n) begin
+        id_ex_valid         <= 1'b0;
+        id_ex_instruction   <= 32'b0;
+        id_ex_pc            <= 32'b0;
+        id_ex_pc_plus4      <= 32'b0;
+        id_ex_rs1_data      <= 32'b0;
+        id_ex_rs2_data      <= 32'b0;
+        id_ex_imm           <= 32'b0;
+        id_ex_rs1           <= 5'b0;
+        id_ex_rs2           <= 5'b0;
+        id_ex_rd            <= 5'b0;
+        id_ex_funct3        <= 3'b0;
 
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
+        id_ex_alu_operation <= 5'b0;
+        id_ex_alu_src_a_sel <= 2'b0;
+        id_ex_alu_src_b     <= 1'b0;
+        id_ex_reg_write     <= 1'b0;
+        id_ex_mem_read      <= 1'b0;
+        id_ex_mem_write     <= 1'b0;
+        id_ex_mem_to_reg    <= 1'b0;
+        id_ex_jump          <= 1'b0;
+    end
+
+    else if (PIPELINE_ACTIVE) begin
+        // Branch/jump redirect or load-use bubble:
+        // invalidate the instruction entering EX.
+        if (flush_id_ex || bubble_id_ex) begin
             id_ex_valid         <= 1'b0;
             id_ex_instruction   <= 32'b0;
             id_ex_pc            <= 32'b0;
@@ -236,7 +325,8 @@ module datapath #(
             id_ex_mem_to_reg    <= 1'b0;
             id_ex_jump          <= 1'b0;
         end
-        else if (instr_latch_en) begin
+
+        else if (pipe_id_ex_en) begin
             id_ex_valid         <= if_id_valid;
             id_ex_instruction   <= if_id_instruction;
             id_ex_pc            <= if_id_pc;
@@ -259,6 +349,31 @@ module datapath #(
             id_ex_jump          <= dec_jump;
         end
     end
+
+    // Existing multi-cycle compatibility path
+    else if (instr_latch_en) begin
+        id_ex_valid         <= if_id_valid;
+        id_ex_instruction   <= if_id_instruction;
+        id_ex_pc            <= if_id_pc;
+        id_ex_pc_plus4      <= if_id_pc_plus4;
+        id_ex_rs1_data      <= rs1_data;
+        id_ex_rs2_data      <= rs2_data;
+        id_ex_imm           <= imm;
+        id_ex_rs1           <= rs1;
+        id_ex_rs2           <= rs2;
+        id_ex_rd            <= rd;
+        id_ex_funct3        <= funct3;
+
+        id_ex_alu_operation <= dec_alu_operation;
+        id_ex_alu_src_a_sel <= dec_alu_src_a_sel;
+        id_ex_alu_src_b     <= dec_alu_src_b;
+        id_ex_reg_write     <= dec_reg_write;
+        id_ex_mem_read      <= dec_mem_read;
+        id_ex_mem_write     <= dec_mem_write;
+        id_ex_mem_to_reg    <= dec_mem_to_reg;
+        id_ex_jump          <= dec_jump;
+    end
+end
 
     // --------------------------------------------------------
     // EX/MEM pipeline register
@@ -295,70 +410,102 @@ module datapath #(
             ex_mem_mem_to_reg  <= 1'b0;
             ex_mem_jump        <= 1'b0;
         end
-        else if (alu_reg_en) begin
-            ex_mem_valid       <= id_ex_valid;
-            ex_mem_instruction <= id_ex_instruction;
-            ex_mem_pc_plus4    <= id_ex_pc_plus4;
-            ex_mem_alu_result <= pipe_alu_result;
-            ex_mem_rs2_data <= forwarded_rs2_data;
-            ex_mem_rd          <= id_ex_rd;
-            ex_mem_funct3      <= id_ex_funct3;
+        else if (PIPELINE_ACTIVE) begin
+    if (pipe_ex_mem_en) begin
+        ex_mem_valid       <= id_ex_valid;
+        ex_mem_instruction <= id_ex_instruction;
+        ex_mem_pc_plus4    <= id_ex_pc_plus4;
+        ex_mem_alu_result  <= pipe_alu_result;
+        ex_mem_rs2_data    <= forwarded_rs2_data;
+        ex_mem_rd          <= id_ex_rd;
+        ex_mem_funct3      <= id_ex_funct3;
 
-            ex_mem_reg_write   <= id_ex_reg_write;
-            ex_mem_mem_read    <= id_ex_mem_read;
-            ex_mem_mem_write   <= id_ex_mem_write;
-            ex_mem_mem_to_reg  <= id_ex_mem_to_reg;
-            ex_mem_jump        <= id_ex_jump;
-        end
-    end
-        // --------------------------------------------------------
-    // MEM/WB pipeline register
-    // --------------------------------------------------------
-    logic        mem_wb_valid;
-    logic [31:0] mem_wb_instruction;
-    logic [31:0] mem_wb_pc_plus4;
-    logic [31:0] mem_wb_alu_result;
-    logic [31:0] mem_wb_mem_data;
-    logic [4:0]  mem_wb_rd;
-    logic [2:0]  mem_wb_funct3;
-
-    logic        mem_wb_reg_write;
-    logic        mem_wb_mem_to_reg;
-    logic        mem_wb_jump;
-
-    assign instruction = if_id_instruction;
-    always_ff @(posedge clk) begin
-    if (!rst_n) begin
-        mem_wb_valid       <= 1'b0;
-        mem_wb_instruction <= 32'b0;
-        mem_wb_pc_plus4    <= 32'b0;
-        mem_wb_alu_result  <= 32'b0;
-        mem_wb_mem_data    <= 32'b0;
-        mem_wb_rd          <= 5'b0;
-        mem_wb_funct3      <= 3'b0;
-
-        mem_wb_reg_write   <= 1'b0;
-        mem_wb_mem_to_reg  <= 1'b0;
-        mem_wb_jump        <= 1'b0;
-    end
-    else if (pipe_mem_wb_en) begin
-        mem_wb_valid       <= ex_mem_valid;
-        mem_wb_instruction <= ex_mem_instruction;
-        mem_wb_pc_plus4    <= ex_mem_pc_plus4;
-        mem_wb_alu_result  <= ex_mem_alu_result;
-
-        // Load data timing will be handled separately.
-        mem_wb_mem_data    <= dmem_read_data;
-
-        mem_wb_rd          <= ex_mem_rd;
-        mem_wb_funct3      <= ex_mem_funct3;
-
-        mem_wb_reg_write   <= ex_mem_reg_write;
-        mem_wb_mem_to_reg  <= ex_mem_mem_to_reg;
-        mem_wb_jump        <= ex_mem_jump;
+        ex_mem_reg_write   <= id_ex_reg_write;
+        ex_mem_mem_read    <= id_ex_mem_read;
+        ex_mem_mem_write   <= id_ex_mem_write;
+        ex_mem_mem_to_reg  <= id_ex_mem_to_reg;
+        ex_mem_jump        <= id_ex_jump;
     end
 end
+    else if (alu_reg_en) begin
+        ex_mem_valid       <= id_ex_valid;
+        ex_mem_instruction <= id_ex_instruction;
+        ex_mem_pc_plus4    <= id_ex_pc_plus4;
+        ex_mem_alu_result  <= pipe_alu_result;
+        ex_mem_rs2_data    <= forwarded_rs2_data;
+        ex_mem_rd          <= id_ex_rd;
+        ex_mem_funct3      <= id_ex_funct3;
 
+        ex_mem_reg_write   <= id_ex_reg_write;
+        ex_mem_mem_read    <= id_ex_mem_read;
+        ex_mem_mem_write   <= id_ex_mem_write;
+        ex_mem_mem_to_reg  <= id_ex_mem_to_reg;
+        ex_mem_jump        <= id_ex_jump;
+    end
+    end
+        // --------------------------------------------------------
+        // MEM/WB pipeline register
+        // --------------------------------------------------------
+        logic        mem_wb_valid;
+        logic [31:0] mem_wb_instruction;
+        logic [31:0] mem_wb_pc_plus4;
+        logic [31:0] mem_wb_alu_result;
+        logic [31:0] mem_wb_mem_data;
+        logic [4:0]  mem_wb_rd;
+        logic [2:0]  mem_wb_funct3;
+
+        logic        mem_wb_reg_write;
+        logic        mem_wb_mem_to_reg;
+        logic        mem_wb_jump;
+
+        assign instruction = if_id_instruction;
+        always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            mem_wb_valid       <= 1'b0;
+            mem_wb_instruction <= 32'b0;
+            mem_wb_pc_plus4    <= 32'b0;
+            mem_wb_alu_result  <= 32'b0;
+            mem_wb_mem_data    <= 32'b0;
+            mem_wb_rd          <= 5'b0;
+            mem_wb_funct3      <= 3'b0;
+
+            mem_wb_reg_write   <= 1'b0;
+            mem_wb_mem_to_reg  <= 1'b0;
+            mem_wb_jump        <= 1'b0;
+        end
+        else if (PIPELINE_ACTIVE) begin
+        if (pipe_mem_wb_en) begin
+            mem_wb_valid       <= ex_mem_valid;
+            mem_wb_instruction <= ex_mem_instruction;
+            mem_wb_pc_plus4    <= ex_mem_pc_plus4;
+            mem_wb_alu_result  <= ex_mem_alu_result;
+            mem_wb_mem_data    <= dmem_read_data;
+            mem_wb_rd          <= ex_mem_rd;
+            mem_wb_funct3      <= ex_mem_funct3;
+
+            mem_wb_reg_write   <= ex_mem_reg_write;
+            mem_wb_mem_to_reg  <= ex_mem_mem_to_reg;
+            mem_wb_jump        <= ex_mem_jump;
+        end
+    end
+        else begin
+            // Compatibility path while the original multi-cycle
+            // control unit still owns architectural state updates.
+            mem_wb_valid       <= ex_mem_valid;
+            mem_wb_instruction <= ex_mem_instruction;
+            mem_wb_pc_plus4    <= ex_mem_pc_plus4;
+            mem_wb_alu_result  <= ex_mem_alu_result;
+            mem_wb_mem_data    <= dmem_read_data;
+            mem_wb_rd          <= ex_mem_rd;
+            mem_wb_funct3      <= ex_mem_funct3;
+
+            mem_wb_reg_write   <= ex_mem_reg_write;
+            mem_wb_mem_to_reg  <= ex_mem_mem_to_reg;
+            mem_wb_jump        <= ex_mem_jump;
+        end
+    end
+       
+   
     // --------------------------------------------------------
     // Instruction field extraction
     // --------------------------------------------------------
@@ -403,11 +550,19 @@ end
     // Program Counter
     // --------------------------------------------------------
     always_ff @(posedge clk) begin
-        if (!rst_n)
-            pc <= PC_RESET;
-        else if (pc_write_en)
-            pc <= pc_next;
+    if (!rst_n) begin
+        pc <= PC_RESET;
     end
+    else if (PIPELINE_ACTIVE) begin
+        if (pipe_redirect_valid)
+            pc <= pipe_redirect_target;
+        else if (!hold_pc)
+            pc <= pc_plus4;
+    end
+    else if (pc_write_en) begin
+        pc <= pc_next;
+    end
+end
 
     assign pc_plus4  = pc + 32'd4;
     assign pc_branch = pc + imm;
@@ -465,9 +620,9 @@ end
 
     // Temporary connections.
     // Real MEM/MDU busy and redirect logic will be connected later.
-    .mem_busy        (1'b0),
+    .mem_busy (pipe_mem_busy),
     .mdu_busy        (1'b0),
-    .redirect_valid  (1'b0),
+    .redirect_valid  (pipe_redirect_valid),
 
     .pipe_if_id_en   (pipe_if_id_en),
     .pipe_id_ex_en   (pipe_id_ex_en),
@@ -523,6 +678,20 @@ end
     .instruction (if_id_instruction),
     .imm_out     (imm)
 );
+    // --------------------------------------------------------
+    // Register-file write-back selection
+    // --------------------------------------------------------
+    assign rf_write_enable =
+        PIPELINE_ACTIVE ? (mem_wb_valid && mem_wb_reg_write)
+                        : reg_write;
+
+    assign rf_write_addr =
+        PIPELINE_ACTIVE ? mem_wb_rd
+                        : rd;
+
+    assign rf_write_data =
+        PIPELINE_ACTIVE ? mem_wb_forward_data
+                        : write_back_data;
 
     register_file u_register_file (
         .clk          (clk),
@@ -530,9 +699,9 @@ end
         .read_data_1  (rs1_data),
         .read_addr_2  (rs2),
         .read_data_2  (rs2_data),
-        .write_enable (reg_write),
-        .write_addr   (rd),
-        .write_data   (write_back_data)
+        .write_enable (rf_write_enable),
+        .write_addr   (rf_write_addr),
+        .write_data   (rf_write_data)
     );
 
     always @(*) begin
@@ -607,6 +776,74 @@ assign alu_operand_b = alu_src_b ? imm : rs2_data;
         .result    (pipe_alu_result),
         .zero      (pipe_alu_zero)
     );
+    // --------------------------------------------------------
+// Pipeline EX control-flow resolution
+// Branches, JAL and JALR are resolved in EX.
+// --------------------------------------------------------
+always @(*) begin
+    pipe_branch_taken   = 1'b0;
+    pipe_redirect_valid = 1'b0;
+    pipe_redirect_target = 32'b0;
+
+    if (id_ex_valid) begin
+        case (id_ex_instruction[6:0])
+
+            OP_B: begin
+                case (id_ex_funct3)
+                    F3_BEQ:
+                        pipe_branch_taken =
+                            (forwarded_rs1_data == forwarded_rs2_data);
+
+                    F3_BNE:
+                        pipe_branch_taken =
+                            (forwarded_rs1_data != forwarded_rs2_data);
+
+                    F3_BLT:
+                        pipe_branch_taken =
+                            ($signed(forwarded_rs1_data) <
+                             $signed(forwarded_rs2_data));
+
+                    F3_BGE:
+                        pipe_branch_taken =
+                            ($signed(forwarded_rs1_data) >=
+                             $signed(forwarded_rs2_data));
+
+                    F3_BLTU:
+                        pipe_branch_taken =
+                            (forwarded_rs1_data < forwarded_rs2_data);
+
+                    F3_BGEU:
+                        pipe_branch_taken =
+                            (forwarded_rs1_data >= forwarded_rs2_data);
+
+                    default:
+                        pipe_branch_taken = 1'b0;
+                endcase
+
+                if (pipe_branch_taken) begin
+                    pipe_redirect_valid  = 1'b1;
+                    pipe_redirect_target = id_ex_pc + id_ex_imm;
+                end
+            end
+
+            OP_JAL: begin
+                pipe_redirect_valid  = 1'b1;
+                pipe_redirect_target = id_ex_pc + id_ex_imm;
+            end
+
+            OP_JALR: begin
+                pipe_redirect_valid  = 1'b1;
+                pipe_redirect_target =
+                    (forwarded_rs1_data + id_ex_imm) & ~32'b1;
+            end
+
+            default: begin
+                pipe_redirect_valid  = 1'b0;
+                pipe_redirect_target = 32'b0;
+            end
+        endcase
+    end
+end
     // --------------------------------------------------------
     // Cross-word-boundary detection (combinational from ALU result)
     // Asserts when a load/store spans two words and needs STATE_MEMORY2.
@@ -721,6 +958,51 @@ assign alu_operand_b = alu_src_b ? imm : rs2_data;
                                         : (jump ? pc_plus4 : alu_result_reg);
 
     // --------------------------------------------------------
+    // Synchronous DMEM load wait tracking
+    // --------------------------------------------------------
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            mem_load_wait <= 1'b0;
+        end
+        else if (PIPELINE_ACTIVE) begin
+            if (mem_load_wait)
+                mem_load_wait <= 1'b0;
+            else if (ex_mem_valid && ex_mem_mem_read)
+                mem_load_wait <= 1'b1;
+        end
+        else begin
+            mem_load_wait <= 1'b0;
+        end
+    end
+
+    assign pipe_mem_busy =
+        PIPELINE_ACTIVE &&
+        ex_mem_valid &&
+        ex_mem_mem_read &&
+        !mem_load_wait;
+    // --------------------------------------------------------
+    // MEM-stage source selection
+    // --------------------------------------------------------
+    assign mem_stage_addr =
+        PIPELINE_ACTIVE ? ex_mem_alu_result
+                        : alu_result_reg;
+
+    assign mem_stage_store_data =
+        PIPELINE_ACTIVE ? ex_mem_rs2_data
+                        : rs2_data;
+
+    assign mem_stage_funct3 =
+        PIPELINE_ACTIVE ? ex_mem_funct3
+                        : funct3;
+
+    assign mem_stage_read =
+        PIPELINE_ACTIVE ? (ex_mem_valid && ex_mem_mem_read)
+                        : mem_read;
+
+    assign mem_stage_write =
+        PIPELINE_ACTIVE ? (ex_mem_valid && ex_mem_mem_write)
+                        : mem_write;
+    // --------------------------------------------------------
     // Data memory connections — fully misalignment-aware
     //
     // First pass  (in_second_pass=0): access word N = {alu_result_reg[31:2], 2'b00}
@@ -736,18 +1018,17 @@ assign alu_operand_b = alu_src_b ? imm : rs2_data;
     // --------------------------------------------------------
 
     logic [1:0] off;
-    assign off = alu_result_reg[1:0];   // byte offset within word
+    assign off = mem_stage_addr[1:0];
 
-    // DMEM address: word-aligned, +4 in second pass
     logic [31:0] dmem_word_base;
-    assign dmem_word_base = {alu_result_reg[31:2], 2'b00};
+    assign dmem_word_base = {mem_stage_addr[31:2], 2'b00};
 
     always @(*) begin
         dmem_addr = in_second_pass ? (dmem_word_base + 32'd4) : dmem_word_base;
     end
 
-    assign dmem_write_en = mem_write;
-    assign dmem_read_en  = mem_read;
+    assign dmem_write_en = mem_stage_write;
+    assign dmem_read_en  = mem_stage_read;
     assign branch_eq     = (rs1_data == rs2_data);
     assign branch_lt     = ($signed(rs1_data) < $signed(rs2_data));
     assign branch_ltu    = (rs1_data < rs2_data);
@@ -756,30 +1037,30 @@ assign alu_operand_b = alu_src_b ? imm : rs2_data;
     always @(*) begin
         if (in_second_pass) begin
             // Second pass: high bytes of rs2 shifted into the low lanes of word N+1
-            case (funct3)
-                F3_SH:   dmem_write_data = {24'b0, rs2_data[15:8]};               // off==3 only
+            case (mem_stage_funct3)
+                F3_SH:   dmem_write_data = {24'b0, mem_stage_store_data[15:8]};               // off==3 only
                 F3_SW: case (off)
-                    2'b01: dmem_write_data = {24'b0, rs2_data[31:24]};
-                    2'b10: dmem_write_data = {16'b0, rs2_data[31:16]};
-                    default: dmem_write_data = {8'b0,  rs2_data[31:8]};            // off==3
+                    2'b01: dmem_write_data = {24'b0, mem_stage_store_data[31:24]};
+                    2'b10: dmem_write_data = {16'b0, mem_stage_store_data[31:16]};
+                    default: dmem_write_data = {8'b0,  mem_stage_store_data[31:8]};            // off==3
                 endcase
-                default: dmem_write_data = rs2_data;
+                default: dmem_write_data = mem_stage_store_data;
             endcase
         end else begin
             // First pass: rs2 data shifted left by off bytes
-            case (funct3)
-                F3_SB: dmem_write_data = {4{rs2_data[7:0]}};
+            case (mem_stage_funct3)
+                F3_SB: dmem_write_data = {4{mem_stage_store_data[7:0]}};
                 F3_SH: case (off)
-                    2'b00: dmem_write_data = {2{rs2_data[15:0]}};
-                    2'b01: dmem_write_data = {8'b0,  rs2_data[15:0], 8'b0};
-                    2'b10: dmem_write_data = {rs2_data[15:0], 16'b0};
-                    default: dmem_write_data = {rs2_data[7:0], 24'b0};             // off==3
+                    2'b00: dmem_write_data = {2{mem_stage_store_data[15:0]}};
+                    2'b01: dmem_write_data = {8'b0,  mem_stage_store_data[15:0], 8'b0};
+                    2'b10: dmem_write_data = {mem_stage_store_data[15:0], 16'b0};
+                    default: dmem_write_data = {mem_stage_store_data[7:0], 24'b0};             // off==3
                 endcase
                 default: case (off)  // F3_SW
-                    2'b00: dmem_write_data = rs2_data;
-                    2'b01: dmem_write_data = {rs2_data[23:0], 8'b0};
-                    2'b10: dmem_write_data = {rs2_data[15:0], 16'b0};
-                    default: dmem_write_data = {rs2_data[7:0], 24'b0};             // off==3
+                    2'b00: dmem_write_data = mem_stage_store_data;
+                    2'b01: dmem_write_data = {mem_stage_store_data[23:0], 8'b0};
+                    2'b10: dmem_write_data = {mem_stage_store_data[15:0], 16'b0};
+                    default: dmem_write_data = {mem_stage_store_data[7:0], 24'b0};             // off==3
                 endcase
             endcase
         end
@@ -789,7 +1070,7 @@ assign alu_operand_b = alu_src_b ? imm : rs2_data;
     always @(*) begin
         if (in_second_pass) begin
             // Second pass: remaining bytes in word N+1
-            case (funct3)
+            case (mem_stage_funct3)
                 F3_SH:   dmem_byte_enable = 4'b0001;                              // sh off==3: 1 byte
                 F3_SW: case (off)
                     2'b01: dmem_byte_enable = 4'b0001;
@@ -800,7 +1081,7 @@ assign alu_operand_b = alu_src_b ? imm : rs2_data;
             endcase
         end else begin
             // First pass: bytes starting at offset off within word N
-            case (funct3)
+            case (mem_stage_funct3)
                 F3_SB:   dmem_byte_enable = 4'b0001 << off;
                 F3_SH:   dmem_byte_enable = (4'b0011 << off) & 4'b1111;
                 F3_SW:   dmem_byte_enable = (4'b1111 << off) & 4'b1111;

@@ -57,10 +57,13 @@ module pipeline_control (
 
         // Long-latency MEM/MDU operation stalls younger stages.
         else if (mem_busy || mdu_busy) begin
-            hold_pc       = 1'b1;
-            hold_if_id    = 1'b1;
-            pipe_if_id_en = 1'b0;
-            pipe_id_ex_en = 1'b0;
+            hold_pc        = 1'b1;
+            hold_if_id     = 1'b1;
+
+            pipe_if_id_en  = 1'b0;
+            pipe_id_ex_en  = 1'b0;
+            pipe_ex_mem_en = 1'b0;
+            pipe_mem_wb_en = 1'b0;
         end
 
         // Load-use hazard:

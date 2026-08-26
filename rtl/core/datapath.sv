@@ -128,7 +128,7 @@ module datapath #(
 
     logic [31:0] fetch_pc_q;
     logic [31:0] fetch_pc_plus4_q;
-
+    logic fetch_discard_q;
     logic        fetch_hold_valid;
     logic [31:0] fetch_hold_pc;
     logic [31:0] fetch_hold_pc_plus4;
@@ -150,6 +150,18 @@ module datapath #(
     logic        mem_stage_write;
     logic mem_load_wait;
     logic pipe_mem_busy;
+    logic        pipe_mdu_start;
+    logic        pipe_mdu_busy;
+    logic        pipe_mdu_done;
+    logic [31:0] pipe_mdu_result;
+
+    logic        pipe_mdu_stall;
+    logic [31:0] pipe_ex_result;
+
+    logic [31:0] id_rs1_data;
+    logic [31:0] id_rs2_data;
+
+    
 
     // --------------------------------------------------------
     // Fetch request PC tracking
@@ -165,10 +177,18 @@ module datapath #(
         fetch_hold_pc            <= 32'b0;
         fetch_hold_pc_plus4      <= 32'b0;
         fetch_hold_instruction   <= 32'b0;
+        fetch_discard_q          <= 1'b0;
     end
+
     else begin
         fetch_pc_q       <= pc;
         fetch_pc_plus4_q <= pc_plus4;
+
+        // Redirect sonrası bir sonraki senkron IMEM cevabını at
+        if (pipe_redirect_valid)
+            fetch_discard_q <= 1'b1;
+        else if (fetch_discard_q && pipe_if_id_en && !hold_if_id)
+            fetch_discard_q <= 1'b0;
 
         // A synchronous IMEM response may arrive while IF/ID is
         // stalled. Preserve that response instead of losing it.
@@ -202,6 +222,7 @@ end
         if_id_pc_plus4    <= 32'b0;
         if_id_instruction <= 32'b0;
     end
+
     else if (PIPELINE_ACTIVE) begin
         if (flush_if_id) begin
             if_id_valid       <= 1'b0;
@@ -209,21 +230,30 @@ end
             if_id_pc_plus4    <= 32'b0;
             if_id_instruction <= 32'b0;
         end
+
         else if (pipe_if_id_en && !hold_if_id) begin
-    if (fetch_hold_valid) begin
-        if_id_valid       <= 1'b1;
-        if_id_pc          <= fetch_hold_pc;
-        if_id_pc_plus4    <= fetch_hold_pc_plus4;
-        if_id_instruction <= fetch_hold_instruction;
+            if (fetch_discard_q) begin
+                if_id_valid       <= 1'b0;
+                if_id_pc          <= 32'b0;
+                if_id_pc_plus4    <= 32'b0;
+                if_id_instruction <= 32'b0;
+            end
+            else if (fetch_hold_valid) begin
+                if_id_valid       <= 1'b1;
+                if_id_pc          <= fetch_hold_pc;
+                if_id_pc_plus4    <= fetch_hold_pc_plus4;
+                if_id_instruction <= fetch_hold_instruction;
+            end
+            else begin
+                if_id_valid       <= 1'b1;
+                if_id_pc          <= fetch_pc_q;
+                if_id_pc_plus4    <= fetch_pc_plus4_q;
+                if_id_instruction <= imem_data;
+            end
+        end
     end
-    else begin
-        if_id_valid       <= 1'b1;
-        if_id_pc          <= fetch_pc_q;
-        if_id_pc_plus4    <= fetch_pc_plus4_q;
-        if_id_instruction <= imem_data;
-    end
-end
-    end
+
+    // Original multi-cycle compatibility path
     else if (instr_latch_en) begin
         if_id_valid       <= 1'b1;
         if_id_pc          <= fetch_pc_q;
@@ -267,6 +297,7 @@ end
     logic        dec_mdu_en;
     logic        dec_illegal_instruction;
     logic        load_use_hazard;
+    logic       id_ex_mdu_en;
 
     assign load_use_hazard =
     id_ex_valid &&
@@ -298,6 +329,7 @@ always_ff @(posedge clk) begin
         id_ex_mem_write     <= 1'b0;
         id_ex_mem_to_reg    <= 1'b0;
         id_ex_jump          <= 1'b0;
+        id_ex_mdu_en        <= 1'b0;
     end
 
     else if (PIPELINE_ACTIVE) begin
@@ -315,6 +347,7 @@ always_ff @(posedge clk) begin
             id_ex_rs2           <= 5'b0;
             id_ex_rd            <= 5'b0;
             id_ex_funct3        <= 3'b0;
+            id_ex_mdu_en        <= 1'b0;
 
             id_ex_alu_operation <= 5'b0;
             id_ex_alu_src_a_sel <= 2'b0;
@@ -331,8 +364,8 @@ always_ff @(posedge clk) begin
             id_ex_instruction   <= if_id_instruction;
             id_ex_pc            <= if_id_pc;
             id_ex_pc_plus4      <= if_id_pc_plus4;
-            id_ex_rs1_data      <= rs1_data;
-            id_ex_rs2_data      <= rs2_data;
+            id_ex_rs1_data <= id_rs1_data;
+            id_ex_rs2_data <= id_rs2_data;
             id_ex_imm           <= imm;
             id_ex_rs1           <= rs1;
             id_ex_rs2           <= rs2;
@@ -347,6 +380,7 @@ always_ff @(posedge clk) begin
             id_ex_mem_write     <= dec_mem_write;
             id_ex_mem_to_reg    <= dec_mem_to_reg;
             id_ex_jump          <= dec_jump;
+            id_ex_mdu_en        <= dec_mdu_en;
         end
     end
 
@@ -356,8 +390,8 @@ always_ff @(posedge clk) begin
         id_ex_instruction   <= if_id_instruction;
         id_ex_pc            <= if_id_pc;
         id_ex_pc_plus4      <= if_id_pc_plus4;
-        id_ex_rs1_data      <= rs1_data;
-        id_ex_rs2_data      <= rs2_data;
+        id_ex_rs1_data <= id_rs1_data;
+        id_ex_rs2_data <= id_rs2_data;
         id_ex_imm           <= imm;
         id_ex_rs1           <= rs1;
         id_ex_rs2           <= rs2;
@@ -372,6 +406,7 @@ always_ff @(posedge clk) begin
         id_ex_mem_write     <= dec_mem_write;
         id_ex_mem_to_reg    <= dec_mem_to_reg;
         id_ex_jump          <= dec_jump;
+        id_ex_mdu_en        <= dec_mdu_en;
     end
 end
 
@@ -415,7 +450,7 @@ end
         ex_mem_valid       <= id_ex_valid;
         ex_mem_instruction <= id_ex_instruction;
         ex_mem_pc_plus4    <= id_ex_pc_plus4;
-        ex_mem_alu_result  <= pipe_alu_result;
+        ex_mem_alu_result <= pipe_ex_result;
         ex_mem_rs2_data    <= forwarded_rs2_data;
         ex_mem_rd          <= id_ex_rd;
         ex_mem_funct3      <= id_ex_funct3;
@@ -431,7 +466,7 @@ end
         ex_mem_valid       <= id_ex_valid;
         ex_mem_instruction <= id_ex_instruction;
         ex_mem_pc_plus4    <= id_ex_pc_plus4;
-        ex_mem_alu_result  <= pipe_alu_result;
+        ex_mem_alu_result <= pipe_ex_result;
         ex_mem_rs2_data    <= forwarded_rs2_data;
         ex_mem_rd          <= id_ex_rd;
         ex_mem_funct3      <= id_ex_funct3;
@@ -504,7 +539,8 @@ end
             mem_wb_jump        <= ex_mem_jump;
         end
     end
-       
+
+    
    
     // --------------------------------------------------------
     // Instruction field extraction
@@ -621,7 +657,7 @@ end
     // Temporary connections.
     // Real MEM/MDU busy and redirect logic will be connected later.
     .mem_busy (pipe_mem_busy),
-    .mdu_busy        (1'b0),
+    .mdu_busy (pipe_mdu_stall),
     .redirect_valid  (pipe_redirect_valid),
 
     .pipe_if_id_en   (pipe_if_id_en),
@@ -704,6 +740,25 @@ end
         .write_data   (rf_write_data)
     );
 
+    
+
+    // --------------------------------------------------------
+    // WB -> ID bypass
+    // Handles register-file write/read occurring in same cycle.
+    // --------------------------------------------------------
+    always @(*) begin
+        id_rs1_data = rs1_data;
+        id_rs2_data = rs2_data;
+
+        if (mem_wb_valid && mem_wb_reg_write && (mem_wb_rd != 5'd0)) begin
+            if (mem_wb_rd == rs1)
+                id_rs1_data = mem_wb_forward_data;
+
+            if (mem_wb_rd == rs2)
+                id_rs2_data = mem_wb_forward_data;
+        end
+    end
+
     always @(*) begin
     case (alu_src_a_sel)
         2'b01:   alu_operand_a = pc;
@@ -777,6 +832,37 @@ assign alu_operand_b = alu_src_b ? imm : rs2_data;
         .zero      (pipe_alu_zero)
     );
     // --------------------------------------------------------
+// Pipeline MDU
+// --------------------------------------------------------
+assign pipe_mdu_start =
+    id_ex_valid &&
+    id_ex_mdu_en &&
+    !pipe_mdu_busy &&
+    !pipe_mdu_done;
+
+    mdu u_pipe_mdu (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .start     (pipe_mdu_start),
+        .operation (id_ex_alu_operation),
+        .operand_a (forwarded_rs1_data),
+        .operand_b (forwarded_rs2_data),
+        .result    (pipe_mdu_result),
+        .busy      (pipe_mdu_busy),
+        .done      (pipe_mdu_done)
+    );
+
+    assign pipe_mdu_stall =
+    id_ex_valid &&
+    id_ex_mdu_en &&
+    !pipe_mdu_done;
+
+    assign pipe_ex_result =
+        id_ex_mdu_en ? pipe_mdu_result
+                    : pipe_alu_result;
+
+
+        // --------------------------------------------------------
 // Pipeline EX control-flow resolution
 // Branches, JAL and JALR are resolved in EX.
 // --------------------------------------------------------

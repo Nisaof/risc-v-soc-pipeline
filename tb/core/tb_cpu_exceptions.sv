@@ -40,6 +40,9 @@ module tb_cpu_exceptions;
     logic [31:0] dmem [0:255];
 
     int error_count;
+    logic read_seen;
+    logic [31:0] invalid_load_instr;
+    logic [31:0] invalid_store_instr;
 
     cpu dut (
         .clk              (clk),
@@ -63,6 +66,8 @@ module tb_cpu_exceptions;
 
     always_ff @(posedge clk) begin
         dmem_read_data <= dmem[dmem_addr[9:2]];
+        if (dmem_read_en)
+            read_seen <= 1'b1;
         if (dmem_write_en) begin
             if (dmem_byte_enable[0]) dmem[dmem_addr[9:2]][7:0]   <= dmem_write_data[7:0];
             if (dmem_byte_enable[1]) dmem[dmem_addr[9:2]][15:8]  <= dmem_write_data[15:8];
@@ -478,12 +483,104 @@ module tb_cpu_exceptions;
         check_dmem(1,    32'h0000_0000, "DMEM[1] MCAUSE");
         check_dmem(2,    32'h0000_0012, "DMEM[2] MTVAL");
 
+        // ==========================================================
+        // TEST 8: Invalid LOAD funct3 (011) is an illegal instruction.
+        // The destination register and memory interface must be untouched,
+        // then execution must resume at the following instruction.
+        // ==========================================================
+
+        rst_n = 1'b0;
+        read_seen = 1'b0;
+        for (i = 0; i < 256; i++) begin imem[i] = 32'h0000_0013; dmem[i] = 0; end
+        dmem[3] = 32'hA5A5_5A5A;
+        invalid_load_instr = encode_i(12, 5'd5, 3'b011, 5'd10, OP_I_LOAD);
+
+        imem[0]  = encode_u(0, 5'd7, OP_AUIPC);
+        imem[1]  = encode_i(48, 5'd7, F3_ADD_SUB, 5'd7, OP_I_ALU);
+        imem[2]  = encode_csrw(CSR_MTVEC, 5'd7);
+        imem[3]  = encode_u(32'h20000000, 5'd5, OP_LUI);
+        imem[4]  = encode_i(85, 5'd0, F3_ADD_SUB, 5'd10, OP_I_ALU);
+        imem[5]  = invalid_load_instr;
+        imem[6]  = encode_i(170, 5'd0, F3_ADD_SUB, 5'd11, OP_I_ALU);
+        imem[7]  = encode_s(0, 5'd11, 5'd5, F3_SW, OP_S);
+        imem[8]  = 32'h0000_006F;
+
+        imem[12] = encode_csrr(5'd28, CSR_MEPC);
+        imem[13] = encode_i(4, 5'd28, F3_ADD_SUB, 5'd28, OP_I_ALU);
+        imem[14] = encode_csrw(CSR_MEPC, 5'd28);
+        imem[15] = encode_csrr(5'd29, CSR_MCAUSE);
+        imem[16] = encode_s(4, 5'd29, 5'd5, F3_SW, OP_S);
+        imem[17] = encode_csrr(5'd30, CSR_MTVAL);
+        imem[18] = encode_s(8, 5'd30, 5'd5, F3_SW, OP_S);
+        imem[19] = 32'h3020_0073;
+
+        @(posedge clk); @(posedge clk);
+        rst_n = 1'b1;
+        repeat (200) @(posedge clk);
+
+        $display("--- Test 8: Invalid LOAD funct3 ---");
+        check_reg(5'd10, 32'd85, "x10 unchanged by invalid load");
+        check_reg(5'd11, 32'd170, "x11 post-MRET execution");
+        check_reg(5'd29, EXC_ILLEGAL_INSTR, "x29 MCAUSE invalid load");
+        check_reg(5'd30, invalid_load_instr, "x30 MTVAL invalid load word");
+        check_dmem(0, 32'd170, "DMEM[0] post-MRET store");
+        check_dmem(1, EXC_ILLEGAL_INSTR, "DMEM[1] MCAUSE invalid load");
+        check_dmem(2, invalid_load_instr, "DMEM[2] MTVAL invalid load");
+        check_dmem(3, 32'hA5A5_5A5A, "DMEM[3] unchanged by invalid load");
+        if (read_seen) begin
+            error_count++;
+            $display("FAIL: invalid load asserted dmem_read_en");
+        end else
+            $display("PASS: invalid load did not assert dmem_read_en");
+
+        // ==========================================================
+        // TEST 9: Invalid STORE funct3 (011) is an illegal instruction.
+        // The target word must remain untouched and execution must resume.
+        // ==========================================================
+
+        rst_n = 1'b0;
+        for (i = 0; i < 256; i++) begin imem[i] = 32'h0000_0013; dmem[i] = 0; end
+        dmem[3] = 32'hA5A5_5A5A;
+        invalid_store_instr = encode_s(12, 5'd8, 5'd5, 3'b011, OP_S);
+
+        imem[0]  = encode_u(0, 5'd7, OP_AUIPC);
+        imem[1]  = encode_i(48, 5'd7, F3_ADD_SUB, 5'd7, OP_I_ALU);
+        imem[2]  = encode_csrw(CSR_MTVEC, 5'd7);
+        imem[3]  = encode_u(32'h20000000, 5'd5, OP_LUI);
+        imem[4]  = encode_i(90, 5'd0, F3_ADD_SUB, 5'd8, OP_I_ALU);
+        imem[5]  = invalid_store_instr;
+        imem[6]  = encode_i(170, 5'd0, F3_ADD_SUB, 5'd11, OP_I_ALU);
+        imem[7]  = encode_s(0, 5'd11, 5'd5, F3_SW, OP_S);
+        imem[8]  = 32'h0000_006F;
+
+        imem[12] = encode_csrr(5'd28, CSR_MEPC);
+        imem[13] = encode_i(4, 5'd28, F3_ADD_SUB, 5'd28, OP_I_ALU);
+        imem[14] = encode_csrw(CSR_MEPC, 5'd28);
+        imem[15] = encode_csrr(5'd29, CSR_MCAUSE);
+        imem[16] = encode_s(4, 5'd29, 5'd5, F3_SW, OP_S);
+        imem[17] = encode_csrr(5'd30, CSR_MTVAL);
+        imem[18] = encode_s(8, 5'd30, 5'd5, F3_SW, OP_S);
+        imem[19] = 32'h3020_0073;
+
+        @(posedge clk); @(posedge clk);
+        rst_n = 1'b1;
+        repeat (200) @(posedge clk);
+
+        $display("--- Test 9: Invalid STORE funct3 ---");
+        check_reg(5'd11, 32'd170, "x11 post-MRET execution");
+        check_reg(5'd29, EXC_ILLEGAL_INSTR, "x29 MCAUSE invalid store");
+        check_reg(5'd30, invalid_store_instr, "x30 MTVAL invalid store word");
+        check_dmem(0, 32'd170, "DMEM[0] post-MRET store");
+        check_dmem(1, EXC_ILLEGAL_INSTR, "DMEM[1] MCAUSE invalid store");
+        check_dmem(2, invalid_store_instr, "DMEM[2] MTVAL invalid store");
+        check_dmem(3, 32'hA5A5_5A5A, "DMEM[3] unchanged by invalid store");
+
         if (error_count != 0) begin
             $display("CPU exception test FAILED: %0d error(s).", error_count);
             $fatal(1);
         end
 
-        $display("CPU exception test passed (34 checks).");
+        $display("CPU exception test passed (50 checks).");
         $finish;
     end
 

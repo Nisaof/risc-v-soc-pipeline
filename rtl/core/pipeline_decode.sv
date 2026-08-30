@@ -164,9 +164,14 @@ module pipeline_decode (
         alu_src_b     = 1'b1;
         alu_operation = ALU_ADD;
 
-        mem_read      = 1'b1;
-        mem_to_reg    = 1'b1;
-        reg_write     = 1'b1;
+        case (funct3)
+            F3_LB, F3_LH, F3_LW, F3_LBU, F3_LHU: begin
+                mem_read   = 1'b1;
+                mem_to_reg = 1'b1;
+                reg_write  = 1'b1;
+            end
+            default: illegal_instruction = 1'b1;
+        endcase
     end
 
     // --------------------------------------------------------
@@ -178,7 +183,10 @@ module pipeline_decode (
         alu_src_b     = 1'b1;
         alu_operation = ALU_ADD;
 
-        mem_write     = 1'b1;
+        case (funct3)
+            F3_SB, F3_SH, F3_SW: mem_write = 1'b1;
+            default:             illegal_instruction = 1'b1;
+        endcase
     end
     // --------------------------------------------------------
     // FENCE

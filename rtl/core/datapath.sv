@@ -170,6 +170,9 @@ module datapath #(
     logic       pipe_cross_access;
     logic       pipe_mem_second_pass;
     logic       mem_second_pass;
+    logic [7:0]  pipe_load_byte;
+    logic [15:0] pipe_load_half;
+    logic [31:0] pipe_load_word;
     logic [31:0] pipe_load_data_formatted;
     logic        pipe_mdu_start;
     logic        pipe_mdu_busy;
@@ -606,9 +609,8 @@ end
             mem_wb_pc_plus4    <= ex_mem_pc_plus4;
             mem_wb_alu_result  <= ex_mem_alu_result;
             mem_wb_mem_data <=
-                pipe_cross_access && ex_mem_mem_read
-                    ? pipe_load_data_formatted
-                    : dmem_read_data;
+                ex_mem_mem_read ? pipe_load_data_formatted
+                                : dmem_read_data;
             mem_wb_rd          <= ex_mem_rd;
             mem_wb_funct3      <= ex_mem_funct3;
 
@@ -1327,22 +1329,53 @@ end
         endcase
     end
 
+    // Canonical pipeline load result. Selection and extension use the
+    // instruction and effective address held in EX/MEM. For a cross-word
+    // access dmem_data_buf is word N and dmem_read_data is word N+1.
+    always @(*) begin
+        case (ex_mem_alu_result[1:0])
+            2'b00:   pipe_load_byte = dmem_read_data[7:0];
+            2'b01:   pipe_load_byte = dmem_read_data[15:8];
+            2'b10:   pipe_load_byte = dmem_read_data[23:16];
+            default: pipe_load_byte = dmem_read_data[31:24];
+        endcase
+    end
+
+    always @(*) begin
+        case (ex_mem_alu_result[1:0])
+            2'b00:   pipe_load_half = dmem_read_data[15:0];
+            2'b01:   pipe_load_half = dmem_read_data[23:8];
+            2'b10:   pipe_load_half = dmem_read_data[31:16];
+            default: pipe_load_half = {dmem_read_data[7:0], dmem_data_buf[31:24]};
+        endcase
+    end
+
     always @(*) begin
         case (ex_mem_alu_result[1:0])
             2'b01:
-                pipe_load_data_formatted =
+                pipe_load_word =
                     {dmem_read_data[7:0], dmem_data_buf[31:8]};
 
             2'b10:
-                pipe_load_data_formatted =
+                pipe_load_word =
                     {dmem_read_data[15:0], dmem_data_buf[31:16]};
 
             2'b11:
-                pipe_load_data_formatted =
+                pipe_load_word =
                     {dmem_read_data[23:0], dmem_data_buf[31:24]};
 
             default:
-                pipe_load_data_formatted = dmem_read_data;
+                pipe_load_word = dmem_read_data;
+        endcase
+    end
+
+    always @(*) begin
+        case (ex_mem_funct3)
+            F3_LB:   pipe_load_data_formatted = {{24{pipe_load_byte[7]}}, pipe_load_byte};
+            F3_LBU:  pipe_load_data_formatted = {24'b0, pipe_load_byte};
+            F3_LH:   pipe_load_data_formatted = {{16{pipe_load_half[15]}}, pipe_load_half};
+            F3_LHU:  pipe_load_data_formatted = {16'b0, pipe_load_half};
+            default: pipe_load_data_formatted = pipe_load_word;
         endcase
     end
 

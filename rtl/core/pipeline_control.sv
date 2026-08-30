@@ -49,14 +49,26 @@ module pipeline_control (
         flush_if_id    = 1'b0;
         flush_id_ex    = 1'b0;
 
-        // Control-flow redirect has highest priority.
-        if (redirect_valid) begin
+        // An older in-flight memory operation must complete before a
+        // younger control-flow redirect can advance the pipeline.
+        if (mem_busy) begin
+            hold_pc        = 1'b1;
+            hold_if_id     = 1'b1;
+
+            pipe_if_id_en  = 1'b0;
+            pipe_id_ex_en  = 1'b0;
+            pipe_ex_mem_en = 1'b0;
+            pipe_mem_wb_en = 1'b0;
+        end
+
+        // Control-flow redirect retains priority over MDU stalls.
+        else if (redirect_valid) begin
             flush_if_id  = 1'b1;
             flush_id_ex  = 1'b1;
         end
 
-        // Long-latency MEM/MDU operation stalls younger stages.
-        else if (mem_busy || mdu_busy) begin
+        // Long-latency MDU operation stalls younger stages.
+        else if (mdu_busy) begin
             hold_pc        = 1'b1;
             hold_if_id     = 1'b1;
 

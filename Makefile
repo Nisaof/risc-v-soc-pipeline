@@ -136,6 +136,25 @@ sim_cpu_regression:
 		tb/core/tb_cpu_regression.sv
 	vvp sim_cpu_regression.vvp
 
+# --- CPU Memory Subword/Misalignment Regression ---
+sim_cpu_memory:
+	iverilog -g2012 -o sim_cpu_memory.vvp \
+		rtl/core/alu_ops.sv \
+		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
+		rtl/core/alu.sv \
+		rtl/core/mdu.sv \
+		rtl/core/register_file.sv \
+		rtl/core/imm_gen.sv \
+		rtl/core/csr_file.sv \
+		rtl/core/control_unit.sv \
+		rtl/core/datapath.sv \
+		rtl/core/cpu.sv \
+		tb/core/tb_cpu_memory.sv
+	vvp sim_cpu_memory.vvp
+
 # --- CPU CSR/Trap Integration Simulation ---
 sim_cpu_csr:
 	iverilog -g2012 -o sim_cpu_csr.vvp \

@@ -24,6 +24,12 @@ module pipeline_decode (
     output logic        uses_rs2,
 
     output logic        mdu_en,
+
+    output logic        csr_en,
+    output logic        csr_write,
+    output logic [1:0]  csr_op,
+    output logic        csr_use_imm,
+
     output logic        illegal_instruction
 );
 
@@ -51,6 +57,10 @@ module pipeline_decode (
         uses_rs2            = 1'b0;
 
         mdu_en              = 1'b0;
+        csr_en      = 1'b0;
+        csr_write   = 1'b0;
+        csr_op      = 2'b00;
+        csr_use_imm = 1'b0;
         illegal_instruction = 1'b0;
 
        case (opcode)
@@ -170,6 +180,19 @@ module pipeline_decode (
 
         mem_write     = 1'b1;
     end
+    // --------------------------------------------------------
+    // FENCE
+    // Treat base RV32I FENCE as a legal NOP in this core.
+    // --------------------------------------------------------
+    7'b0001111: begin
+        if (funct3 == 3'b000) begin
+            // FENCE: no architectural state change.
+            // All control outputs remain at their defaults.
+        end
+        else begin
+            illegal_instruction = 1'b1;
+        end
+    end
         // --------------------------------------------------------
     // BRANCH
     // --------------------------------------------------------
@@ -229,6 +252,44 @@ module pipeline_decode (
         alu_operation = ALU_ADD;
     end
 
+    // --------------------------------------------------------
+    // SYSTEM / CSR
+    // --------------------------------------------------------
+    OP_SYSTEM: begin
+        // funct3 == 000:
+        // ECALL / EBREAK / MRET
+        // These do not perform a normal CSR rd write here.
+        if (funct3 == 3'b000) begin
+            csr_en      = 1'b0;
+            csr_write   = 1'b0;
+            reg_write   = 1'b0;
+        end
+        else begin
+            // CSRRW / CSRRS / CSRRC
+            // CSRRWI / CSRRSI / CSRRCI
+            csr_en    = 1'b1;
+            reg_write = 1'b1;
+
+            csr_use_imm = funct3[2];
+
+            case (funct3[1:0])
+                2'b01: csr_op = 2'b00; // write
+                2'b10: csr_op = 2'b01; // set
+                2'b11: csr_op = 2'b10; // clear
+                default: csr_op = 2'b00;
+            endcase
+
+            // Register CSR variants consume rs1.
+            if (!funct3[2])
+                uses_rs1 = 1'b1;
+
+            // CSRRS/CSRRC(/I) with rs1/zimm=x0 must not write.
+            if (funct3[1] && (instruction[19:15] == 5'd0))
+                csr_write = 1'b0;
+            else
+                csr_write = 1'b1;
+        end
+    end
     default: begin
         illegal_instruction = 1'b1;
     end

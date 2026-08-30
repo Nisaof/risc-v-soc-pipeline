@@ -28,6 +28,10 @@ module csr_file (
     input  logic [1:0]  csr_op,           // 00=write, 01=set-bits, 10=clear-bits
     input  logic        csr_write_en,     // enable write (gated for CSRRS/CSRRC with rs1=x0)
     input  logic        instret_en,       // HIGH in the cycle an instruction retires
+    // Pipeline CSR commit interface (WB stage)
+    input  logic        pipe_csr_write_en,
+    input  logic [11:0] pipe_csr_addr,
+    input  logic [31:0] pipe_csr_wdata,
 
     // Outputs
     output logic [31:0] csr_rdata,        // old CSR value (for rd writeback)
@@ -103,50 +107,163 @@ module csr_file (
     end
 
     always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            mstatus_mie  <= 1'b0;
-            mstatus_mpie <= 1'b0;
-            mie_reg      <= 32'b0;
-            mtvec_reg    <= 32'b0;
-            mscratch_reg <= 32'b0;
-            mepc_reg     <= 32'b0;
-            mcause_reg   <= 32'b0;
-            mtval_reg    <= 32'b0;
+    if (!rst_n) begin
+        mstatus_mie  <= 1'b0;
+        mstatus_mpie <= 1'b0;
+        mie_reg      <= 32'b0;
+        mtvec_reg    <= 32'b0;
+        mscratch_reg <= 32'b0;
+        mepc_reg     <= 32'b0;
+        mcause_reg   <= 32'b0;
+        mtval_reg    <= 32'b0;
+    end
+    else begin
+
+        // ----------------------------------------------------
+        // Older pipeline CSR instruction commits at WB.
+        // This is allowed to happen in the same cycle that a
+        // younger instruction takes a trap or executes MRET.
+        // ----------------------------------------------------
+        if (pipe_csr_write_en) begin
+            case (pipe_csr_addr)
+
+                CSR_MSTATUS: begin
+                    mstatus_mie  <= pipe_csr_wdata[3];
+                    mstatus_mpie <= pipe_csr_wdata[7];
+                end
+
+                CSR_MIE: begin
+                    mie_reg <= pipe_csr_wdata & 32'h888;
+                end
+
+                CSR_MTVEC: begin
+                    mtvec_reg <= pipe_csr_wdata;
+                end
+
+                CSR_MSCRATCH: begin
+                    mscratch_reg <= pipe_csr_wdata;
+                end
+
+                CSR_MEPC: begin
+                    mepc_reg <= {pipe_csr_wdata[31:2], 2'b00};
+                end
+
+                CSR_MCAUSE: begin
+                    mcause_reg <= pipe_csr_wdata;
+                end
+
+                CSR_MTVAL: begin
+                    mtval_reg <= pipe_csr_wdata;
+                end
+
+                default: begin
+                end
+            endcase
         end
-        else if (trap_en) begin
-            mepc_reg     <= trap_pc;
-            mcause_reg   <= trap_cause;
-            mtval_reg    <= trap_val;
-            mstatus_mpie <= mstatus_mie;
-            mstatus_mie  <= 1'b0;
-        end
-        else if (mret_en) begin
-            mstatus_mie  <= mstatus_mpie;
-            mstatus_mpie <= 1'b1;
-        end
-        else if (csr_write_en) begin
+
+        // ----------------------------------------------------
+        // Legacy multi-cycle CSR write path.
+        // Used only when there is no pipeline CSR commit,
+        // trap, or MRET in this cycle.
+        // ----------------------------------------------------
+        else if (!trap_en && !mret_en && csr_write_en) begin
             case (csr_addr)
+
                 CSR_MSTATUS: begin
                     mstatus_mie  <= csr_new_val[3];
                     mstatus_mpie <= csr_new_val[7];
                 end
-                CSR_MIE:      mie_reg      <= csr_new_val & 32'h888;
-                CSR_MTVEC:    mtvec_reg    <= csr_new_val;
-                CSR_MSCRATCH: mscratch_reg <= csr_new_val;
-                CSR_MEPC:     mepc_reg     <= {csr_new_val[31:2], 2'b00};
-                CSR_MCAUSE:   mcause_reg   <= csr_new_val;
-                CSR_MTVAL:    mtval_reg    <= csr_new_val;
-                // CSR_MIP, CSR_MHARTID: read-only, writes silently dropped
-                default: ;
+
+                CSR_MIE: begin
+                    mie_reg <= csr_new_val & 32'h888;
+                end
+
+                CSR_MTVEC: begin
+                    mtvec_reg <= csr_new_val;
+                end
+
+                CSR_MSCRATCH: begin
+                    mscratch_reg <= csr_new_val;
+                end
+
+                CSR_MEPC: begin
+                    mepc_reg <= {csr_new_val[31:2], 2'b00};
+                end
+
+                CSR_MCAUSE: begin
+                    mcause_reg <= csr_new_val;
+                end
+
+                CSR_MTVAL: begin
+                    mtval_reg <= csr_new_val;
+                end
+
+                default: begin
+                end
             endcase
         end
+
+        // ----------------------------------------------------
+        // Trap entry.
+        // Comes after CSR commit so trap state wins for
+        // MEPC/MCAUSE/MTVAL and MSTATUS trap fields.
+        // ----------------------------------------------------
+        if (trap_en) begin
+            mepc_reg   <= trap_pc;
+            mcause_reg <= trap_cause;
+            mtval_reg  <= trap_val;
+
+            // If an older MSTATUS CSR write commits in this
+            // same cycle, trap entry must save that new MIE.
+            if (pipe_csr_write_en &&
+                (pipe_csr_addr == CSR_MSTATUS))
+                mstatus_mpie <= pipe_csr_wdata[3];
+            else
+                mstatus_mpie <= mstatus_mie;
+
+            mstatus_mie <= 1'b0;
+        end
+
+        // ----------------------------------------------------
+        // MRET
+        // ----------------------------------------------------
+        else if (mret_en) begin
+            // Same ordering rule for an older MSTATUS write.
+            if (pipe_csr_write_en &&
+                (pipe_csr_addr == CSR_MSTATUS))
+                mstatus_mie <= pipe_csr_wdata[7];
+            else
+                mstatus_mie <= mstatus_mpie;
+
+            mstatus_mpie <= 1'b1;
+        end
     end
+end
 
     // --------------------------------------------------------
     // Output signals
     // --------------------------------------------------------
     assign mtvec_out  = {mtvec_reg[31:2], 2'b00};  // direct mode: BASE only
     assign mepc_out   = mepc_reg;
-    assign irq_pending = irq_m_timer & mstatus_mie & mie_reg[7];
+    logic irq_mie_effective;
+logic irq_mtie_effective;
 
+always @(*) begin
+    irq_mie_effective  = mstatus_mie;
+    irq_mtie_effective = mie_reg[7];
+
+    // See an older CSR write in WB in the same cycle.
+    if (pipe_csr_write_en) begin
+        if (pipe_csr_addr == CSR_MSTATUS)
+            irq_mie_effective = pipe_csr_wdata[3];
+
+        if (pipe_csr_addr == CSR_MIE)
+            irq_mtie_effective = pipe_csr_wdata[7];
+    end
+end
+
+assign irq_pending =
+    irq_m_timer &&
+    irq_mie_effective &&
+    irq_mtie_effective;
 endmodule

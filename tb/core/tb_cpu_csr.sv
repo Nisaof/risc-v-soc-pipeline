@@ -271,9 +271,14 @@ module tb_cpu_csr;
         @(posedge clk);
         rst_n = 1'b1;
 
-        // 8 setup instructions × 4 cycles = 32 cycles. Fire irq after cycle 32
-        // so the next STATE_FETCH (NOP at 0x20) sees irq_pending=1.
-        repeat (32) @(posedge clk);
+        // Pipeline version:
+        // assert the timer IRQ when the NOP at PC=0x20 reaches ID/EX.
+        wait (
+            dut.u_datapath.id_ex_valid &&
+            dut.u_datapath.id_ex_pc == 32'h0000_0020
+        );
+
+        @(negedge clk);
         irq_m_timer = 1'b1;
 
         repeat (250) @(posedge clk);

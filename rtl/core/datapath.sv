@@ -119,6 +119,14 @@ module datapath #(
     logic [31:0] forwarded_rs1_data;
     logic [31:0] forwarded_rs2_data;
     logic [31:0] mem_wb_forward_data;
+    logic [31:0] ex_mem_forward_data;
+    logic [31:0] pipe_csr_operand;
+    logic [31:0] pipe_csr_old_value;
+    logic [31:0] pipe_csr_new_value;
+
+    logic        pipe_csr_commit_en;
+    logic [11:0] pipe_csr_commit_addr;
+    logic [31:0] pipe_csr_commit_data;
 
     logic [31:0] pipe_alu_operand_a;
     logic [31:0] pipe_alu_operand_b;
@@ -138,6 +146,14 @@ module datapath #(
     logic        pipe_branch_taken;
     logic        pipe_redirect_valid;
     logic [31:0] pipe_redirect_target;
+    logic [31:0] pipe_mtvec_target;
+    logic [31:0] pipe_jalr_target;
+    logic [31:0] pipe_branch_target;
+    logic        pipe_trap_en;
+    logic        pipe_mret_en;
+    logic [31:0] pipe_trap_cause;
+    logic [31:0] pipe_trap_val;
+    logic [31:0] pipe_trap_pc;
 
     logic        rf_write_enable;
     logic [4:0]  rf_write_addr;
@@ -150,6 +166,11 @@ module datapath #(
     logic        mem_stage_write;
     logic mem_load_wait;
     logic pipe_mem_busy;
+    logic [1:0] pipe_cross_state;
+    logic       pipe_cross_access;
+    logic       pipe_mem_second_pass;
+    logic       mem_second_pass;
+    logic [31:0] pipe_load_data_formatted;
     logic        pipe_mdu_start;
     logic        pipe_mdu_busy;
     logic        pipe_mdu_done;
@@ -161,7 +182,7 @@ module datapath #(
     logic [31:0] id_rs1_data;
     logic [31:0] id_rs2_data;
 
-    
+
 
     // --------------------------------------------------------
     // Fetch request PC tracking
@@ -296,8 +317,17 @@ end
     logic        dec_uses_rs2;
     logic        dec_mdu_en;
     logic        dec_illegal_instruction;
+    logic        dec_csr_en;
+    logic        dec_csr_write;
+    logic [1:0]  dec_csr_op;
+    logic        dec_csr_use_imm;
     logic        load_use_hazard;
     logic       id_ex_mdu_en;
+    logic        id_ex_csr_en;
+    logic        id_ex_csr_write;
+    logic [1:0]  id_ex_csr_op;
+    logic        id_ex_csr_use_imm;
+    logic        id_ex_illegal_instruction;
 
     assign load_use_hazard =
     id_ex_valid &&
@@ -330,6 +360,11 @@ always_ff @(posedge clk) begin
         id_ex_mem_to_reg    <= 1'b0;
         id_ex_jump          <= 1'b0;
         id_ex_mdu_en        <= 1'b0;
+        id_ex_csr_en      <= 1'b0;
+        id_ex_csr_write   <= 1'b0;
+        id_ex_csr_op      <= 2'b00;
+        id_ex_csr_use_imm <= 1'b0;
+        id_ex_illegal_instruction <= 1'b0;
     end
 
     else if (PIPELINE_ACTIVE) begin
@@ -348,6 +383,11 @@ always_ff @(posedge clk) begin
             id_ex_rd            <= 5'b0;
             id_ex_funct3        <= 3'b0;
             id_ex_mdu_en        <= 1'b0;
+            id_ex_csr_en      <= 1'b0;
+            id_ex_csr_write   <= 1'b0;
+            id_ex_csr_op      <= 2'b00;
+            id_ex_csr_use_imm <= 1'b0;
+            id_ex_illegal_instruction <= 1'b0;
 
             id_ex_alu_operation <= 5'b0;
             id_ex_alu_src_a_sel <= 2'b0;
@@ -381,6 +421,11 @@ always_ff @(posedge clk) begin
             id_ex_mem_to_reg    <= dec_mem_to_reg;
             id_ex_jump          <= dec_jump;
             id_ex_mdu_en        <= dec_mdu_en;
+            id_ex_csr_en      <= dec_csr_en;
+            id_ex_csr_write   <= dec_csr_write;
+            id_ex_csr_op      <= dec_csr_op;
+            id_ex_csr_use_imm <= dec_csr_use_imm;
+            id_ex_illegal_instruction <= dec_illegal_instruction;
         end
     end
 
@@ -407,6 +452,11 @@ always_ff @(posedge clk) begin
         id_ex_mem_to_reg    <= dec_mem_to_reg;
         id_ex_jump          <= dec_jump;
         id_ex_mdu_en        <= dec_mdu_en;
+        id_ex_csr_en      <= dec_csr_en;
+        id_ex_csr_write   <= dec_csr_write;
+        id_ex_csr_op      <= dec_csr_op;
+        id_ex_csr_use_imm <= dec_csr_use_imm;
+        id_ex_illegal_instruction <= dec_illegal_instruction;
     end
 end
 
@@ -420,12 +470,18 @@ end
     logic [31:0] ex_mem_rs2_data;
     logic [4:0]  ex_mem_rd;
     logic [2:0]  ex_mem_funct3;
+    logic [31:0] ex_mem_csr_old_value;
+    logic [31:0] ex_mem_csr_new_value;
 
     logic        ex_mem_reg_write;
     logic        ex_mem_mem_read;
     logic        ex_mem_mem_write;
     logic        ex_mem_mem_to_reg;
     logic        ex_mem_jump;
+    logic        ex_mem_csr_en;
+    logic        ex_mem_csr_write;
+    logic [1:0]  ex_mem_csr_op;
+    logic        ex_mem_csr_use_imm;
 
 
 
@@ -444,24 +500,47 @@ end
             ex_mem_mem_write   <= 1'b0;
             ex_mem_mem_to_reg  <= 1'b0;
             ex_mem_jump        <= 1'b0;
+            ex_mem_csr_en      <= 1'b0;
+            ex_mem_csr_write   <= 1'b0;
+            ex_mem_csr_op      <= 2'b00;
+            ex_mem_csr_use_imm <= 1'b0;
+            ex_mem_csr_old_value <= 32'b0;
+            ex_mem_csr_new_value <= 32'b0;
         end
         else if (PIPELINE_ACTIVE) begin
-    if (pipe_ex_mem_en) begin
-        ex_mem_valid       <= id_ex_valid;
-        ex_mem_instruction <= id_ex_instruction;
-        ex_mem_pc_plus4    <= id_ex_pc_plus4;
-        ex_mem_alu_result <= pipe_ex_result;
-        ex_mem_rs2_data    <= forwarded_rs2_data;
-        ex_mem_rd          <= id_ex_rd;
-        ex_mem_funct3      <= id_ex_funct3;
 
-        ex_mem_reg_write   <= id_ex_reg_write;
-        ex_mem_mem_read    <= id_ex_mem_read;
-        ex_mem_mem_write   <= id_ex_mem_write;
-        ex_mem_mem_to_reg  <= id_ex_mem_to_reg;
-        ex_mem_jump        <= id_ex_jump;
+        // Cross-word load/store iki memory erişimi tamamlanana
+        // kadar EX/MEM'de tutulur.
+        if (pipe_cross_access &&
+            (pipe_cross_state != 2'd2)) begin
+
+            // Hold EX/MEM registers.
+            // Bilerek assignment yapılmıyor.
+        end
+
+        else if (pipe_ex_mem_en) begin
+            ex_mem_valid       <= id_ex_valid;
+            ex_mem_instruction <= id_ex_instruction;
+            ex_mem_pc_plus4    <= id_ex_pc_plus4;
+            ex_mem_alu_result  <= pipe_ex_result;
+            ex_mem_rs2_data    <= forwarded_rs2_data;
+            ex_mem_rd          <= id_ex_rd;
+            ex_mem_funct3      <= id_ex_funct3;
+
+            ex_mem_reg_write   <= id_ex_reg_write;
+            ex_mem_mem_read    <= id_ex_mem_read;
+            ex_mem_mem_write   <= id_ex_mem_write;
+            ex_mem_mem_to_reg  <= id_ex_mem_to_reg;
+            ex_mem_jump        <= id_ex_jump;
+
+            ex_mem_csr_en        <= id_ex_csr_en;
+            ex_mem_csr_write     <= id_ex_csr_write;
+            ex_mem_csr_op        <= id_ex_csr_op;
+            ex_mem_csr_use_imm   <= id_ex_csr_use_imm;
+            ex_mem_csr_old_value <= pipe_csr_old_value;
+            ex_mem_csr_new_value <= pipe_csr_new_value;
+        end
     end
-end
     else if (alu_reg_en) begin
         ex_mem_valid       <= id_ex_valid;
         ex_mem_instruction <= id_ex_instruction;
@@ -492,6 +571,12 @@ end
         logic        mem_wb_reg_write;
         logic        mem_wb_mem_to_reg;
         logic        mem_wb_jump;
+        logic        mem_wb_csr_en;
+        logic        mem_wb_csr_write;
+        logic [1:0]  mem_wb_csr_op;
+        logic        mem_wb_csr_use_imm;
+        logic [31:0] mem_wb_csr_old_value;
+        logic [31:0] mem_wb_csr_new_value;
 
         assign instruction = if_id_instruction;
         always_ff @(posedge clk) begin
@@ -507,6 +592,12 @@ end
             mem_wb_reg_write   <= 1'b0;
             mem_wb_mem_to_reg  <= 1'b0;
             mem_wb_jump        <= 1'b0;
+            mem_wb_csr_en      <= 1'b0;
+            mem_wb_csr_write   <= 1'b0;
+            mem_wb_csr_op      <= 2'b00;
+            mem_wb_csr_use_imm <= 1'b0;
+            mem_wb_csr_old_value <= 32'b0;
+            mem_wb_csr_new_value <= 32'b0;
         end
         else if (PIPELINE_ACTIVE) begin
         if (pipe_mem_wb_en) begin
@@ -514,16 +605,25 @@ end
             mem_wb_instruction <= ex_mem_instruction;
             mem_wb_pc_plus4    <= ex_mem_pc_plus4;
             mem_wb_alu_result  <= ex_mem_alu_result;
-            mem_wb_mem_data    <= dmem_read_data;
+            mem_wb_mem_data <=
+                pipe_cross_access && ex_mem_mem_read
+                    ? pipe_load_data_formatted
+                    : dmem_read_data;
             mem_wb_rd          <= ex_mem_rd;
             mem_wb_funct3      <= ex_mem_funct3;
 
             mem_wb_reg_write   <= ex_mem_reg_write;
             mem_wb_mem_to_reg  <= ex_mem_mem_to_reg;
             mem_wb_jump        <= ex_mem_jump;
+            mem_wb_csr_en      <= ex_mem_csr_en;
+            mem_wb_csr_write   <= ex_mem_csr_write;
+            mem_wb_csr_op      <= ex_mem_csr_op;
+            mem_wb_csr_use_imm <= ex_mem_csr_use_imm;
+            mem_wb_csr_old_value <= ex_mem_csr_old_value;
+            mem_wb_csr_new_value <= ex_mem_csr_new_value;
         end
     end
-        else begin
+                else begin
             // Compatibility path while the original multi-cycle
             // control unit still owns architectural state updates.
             mem_wb_valid       <= ex_mem_valid;
@@ -534,14 +634,20 @@ end
             mem_wb_rd          <= ex_mem_rd;
             mem_wb_funct3      <= ex_mem_funct3;
 
-            mem_wb_reg_write   <= ex_mem_reg_write;
-            mem_wb_mem_to_reg  <= ex_mem_mem_to_reg;
-            mem_wb_jump        <= ex_mem_jump;
+            mem_wb_reg_write     <= ex_mem_reg_write;
+            mem_wb_mem_to_reg    <= ex_mem_mem_to_reg;
+            mem_wb_jump          <= ex_mem_jump;
+            mem_wb_csr_en        <= ex_mem_csr_en;
+            mem_wb_csr_write     <= ex_mem_csr_write;
+            mem_wb_csr_op        <= ex_mem_csr_op;
+            mem_wb_csr_use_imm   <= ex_mem_csr_use_imm;
+            mem_wb_csr_old_value <= ex_mem_csr_old_value;
+            mem_wb_csr_new_value <= ex_mem_csr_new_value;
         end
     end
 
-    
-   
+
+
     // --------------------------------------------------------
     // Instruction field extraction
     // --------------------------------------------------------
@@ -576,11 +682,19 @@ end
     // so WRITEBACK has both word N (here) and word N+1 (dmem_read_data).
     // --------------------------------------------------------
     always_ff @(posedge clk) begin
-        if (!rst_n)
-            dmem_data_buf <= 32'b0;
-        else if (in_second_pass)
+    if (!rst_n) begin
+        dmem_data_buf <= 32'b0;
+    end
+    else if (PIPELINE_ACTIVE) begin
+        // During state 1, dmem_read_data still contains
+        // the response from the first word access.
+        if (pipe_cross_access && (pipe_cross_state == 2'd1))
             dmem_data_buf <= dmem_read_data;
     end
+    else if (in_second_pass) begin
+        dmem_data_buf <= dmem_read_data;
+    end
+end
 
     // --------------------------------------------------------
     // Program Counter
@@ -639,8 +753,14 @@ end
     .uses_rs1            (dec_uses_rs1),
     .uses_rs2            (dec_uses_rs2),
 
-    .mdu_en               (dec_mdu_en),
-    .illegal_instruction (dec_illegal_instruction)
+    .mdu_en              (dec_mdu_en),
+
+    .csr_en              (dec_csr_en),
+    .csr_write           (dec_csr_write),
+    .csr_op              (dec_csr_op),
+    .csr_use_imm         (dec_csr_use_imm),
+
+.illegal_instruction (dec_illegal_instruction)
 );
 
     pipeline_control u_pipeline_control (
@@ -686,26 +806,47 @@ end
     .forward_a        (forward_a),
     .forward_b        (forward_b)
 );
+    // --------------------------------------------------------
+    // Pipeline CSR execution
+    // --------------------------------------------------------
+    assign pipe_csr_operand =
+        id_ex_csr_use_imm
+            ? {27'b0, id_ex_instruction[19:15]}
+            : forwarded_rs1_data;
 
+    assign pipe_csr_old_value = csr_rdata;
+
+    always @(*) begin
+        case (id_ex_csr_op)
+            2'b00:   pipe_csr_new_value = pipe_csr_operand;
+            2'b01:   pipe_csr_new_value = pipe_csr_old_value | pipe_csr_operand;
+            2'b10:   pipe_csr_new_value = pipe_csr_old_value & ~pipe_csr_operand;
+            default: pipe_csr_new_value = pipe_csr_operand;
+        endcase
+    end
     // --------------------------------------------------------
 // Forwarding data selection
 // --------------------------------------------------------
-
+assign ex_mem_forward_data =
+    ex_mem_csr_en ? ex_mem_csr_old_value :
+    ex_mem_jump   ? ex_mem_pc_plus4 :
+                    ex_mem_alu_result;
 // Value produced by the instruction in MEM/WB.
 assign mem_wb_forward_data =
+    mem_wb_csr_en     ? mem_wb_csr_old_value :
     mem_wb_mem_to_reg ? mem_wb_mem_data :
     mem_wb_jump       ? mem_wb_pc_plus4 :
                         mem_wb_alu_result;
 
 always @(*) begin
     case (forward_a)
-        2'b10:   forwarded_rs1_data = ex_mem_alu_result;
+        2'b10:   forwarded_rs1_data = ex_mem_forward_data;
         2'b01:   forwarded_rs1_data = mem_wb_forward_data;
         default: forwarded_rs1_data = id_ex_rs1_data;
     endcase
 
     case (forward_b)
-        2'b10:   forwarded_rs2_data = ex_mem_alu_result;
+        2'b10:   forwarded_rs2_data = ex_mem_forward_data;
         2'b01:   forwarded_rs2_data = mem_wb_forward_data;
         default: forwarded_rs2_data = id_ex_rs2_data;
     endcase
@@ -714,6 +855,18 @@ end
     .instruction (if_id_instruction),
     .imm_out     (imm)
 );
+
+    assign pipe_csr_commit_en =
+        PIPELINE_ACTIVE &&
+        mem_wb_valid &&
+        mem_wb_csr_en &&
+        mem_wb_csr_write;
+
+    assign pipe_csr_commit_addr =
+        mem_wb_instruction[31:20];
+
+    assign pipe_csr_commit_data =
+        mem_wb_csr_new_value;
     // --------------------------------------------------------
     // Register-file write-back selection
     // --------------------------------------------------------
@@ -740,7 +893,7 @@ end
         .write_data   (rf_write_data)
     );
 
-    
+
 
     // --------------------------------------------------------
     // WB -> ID bypass
@@ -861,73 +1014,192 @@ assign pipe_mdu_start =
         id_ex_mdu_en ? pipe_mdu_result
                     : pipe_alu_result;
 
+    assign pipe_mtvec_target =
+    (pipe_csr_commit_en && (pipe_csr_commit_addr == CSR_MTVEC))
+        ? {pipe_csr_commit_data[31:2], 2'b00}
+        : mtvec_out;
 
-        // --------------------------------------------------------
+    assign pipe_jalr_target =
+    (forwarded_rs1_data + id_ex_imm) & ~32'b1;
+
+    assign pipe_branch_target =
+    id_ex_pc + id_ex_imm;
+// --------------------------------------------------------
+// Pipeline SYSTEM / trap control
+// --------------------------------------------------------
+always @(*) begin
+    pipe_trap_en    = 1'b0;
+    pipe_mret_en    = 1'b0;
+    pipe_trap_cause = 32'b0;
+    pipe_trap_val   = 32'b0;
+    pipe_trap_pc    = id_ex_pc;
+
+    // Timer interrupt is taken at an instruction boundary.
+    // The instruction currently in EX is the interrupted
+    // instruction and will be flushed/restarted via MEPC.
+    if (id_ex_valid && irq_pending) begin
+    pipe_trap_en    = 1'b1;
+    pipe_trap_cause = EXC_M_TIMER_IRQ;
+    pipe_trap_val   = 32'b0;
+
+    // For an asynchronous interrupt, save the oldest
+    // not-yet-retired pipeline instruction as the resume PC.
+    if (ex_mem_valid)
+        pipe_trap_pc = ex_mem_pc_plus4 - 32'd4;
+    else
+        pipe_trap_pc = id_ex_pc;
+end
+
+else if (id_ex_valid && id_ex_illegal_instruction) begin
+    pipe_trap_en    = 1'b1;
+    pipe_trap_cause = EXC_ILLEGAL_INSTR;
+    pipe_trap_val   = id_ex_instruction;
+    pipe_trap_pc    = id_ex_pc;
+end
+
+else if (id_ex_valid &&
+         (id_ex_instruction[6:0] == OP_JALR) &&
+         pipe_jalr_target[1]) begin
+
+    pipe_trap_en    = 1'b1;
+    pipe_trap_cause = EXC_FETCH_MISALIGN;
+    pipe_trap_val   = pipe_jalr_target;
+    pipe_trap_pc    = id_ex_pc;
+end
+
+else if (id_ex_valid &&
+         (id_ex_instruction[6:0] == OP_B) &&
+         (
+             ((id_ex_funct3 == F3_BEQ)  && (forwarded_rs1_data == forwarded_rs2_data)) ||
+             ((id_ex_funct3 == F3_BNE)  && (forwarded_rs1_data != forwarded_rs2_data)) ||
+             ((id_ex_funct3 == F3_BLT)  && ($signed(forwarded_rs1_data) <  $signed(forwarded_rs2_data))) ||
+             ((id_ex_funct3 == F3_BGE)  && ($signed(forwarded_rs1_data) >= $signed(forwarded_rs2_data))) ||
+             ((id_ex_funct3 == F3_BLTU) && (forwarded_rs1_data <  forwarded_rs2_data)) ||
+             ((id_ex_funct3 == F3_BGEU) && (forwarded_rs1_data >= forwarded_rs2_data))
+         ) &&
+         pipe_branch_target[1]) begin
+
+    pipe_trap_en    = 1'b1;
+    pipe_trap_cause = EXC_FETCH_MISALIGN;
+    pipe_trap_val   = pipe_branch_target;
+    pipe_trap_pc    = id_ex_pc;
+end
+
+else if (id_ex_valid &&
+         (id_ex_instruction[6:0] == OP_SYSTEM) &&
+         (id_ex_funct3 == 3'b000)) begin
+
+        case (id_ex_instruction[31:20])
+
+            12'h000: begin
+                // ECALL from M-mode
+                pipe_trap_en    = 1'b1;
+                pipe_trap_cause = EXC_ECALL_M;
+                pipe_trap_val   = 32'b0;
+                pipe_trap_pc    = id_ex_pc;
+            end
+
+            12'h001: begin
+                // EBREAK
+                pipe_trap_en    = 1'b1;
+                pipe_trap_cause = EXC_EBREAK;
+                pipe_trap_val   = 32'b0;
+                pipe_trap_pc    = id_ex_pc;
+            end
+
+            12'h302: begin
+                // MRET
+                pipe_mret_en = 1'b1;
+            end
+
+            default: begin
+            end
+        endcase
+    end
+end
+
+// --------------------------------------------------------
 // Pipeline EX control-flow resolution
 // Branches, JAL and JALR are resolved in EX.
 // --------------------------------------------------------
 always @(*) begin
-    pipe_branch_taken   = 1'b0;
-    pipe_redirect_valid = 1'b0;
+    pipe_branch_taken    = 1'b0;
+    pipe_redirect_valid  = 1'b0;
     pipe_redirect_target = 32'b0;
 
     if (id_ex_valid) begin
-        case (id_ex_instruction[6:0])
 
-            OP_B: begin
-                case (id_ex_funct3)
-                    F3_BEQ:
-                        pipe_branch_taken =
-                            (forwarded_rs1_data == forwarded_rs2_data);
+        // Exceptions / interrupts override normal control flow.
+        if (pipe_trap_en) begin
+            pipe_redirect_valid  = 1'b1;
+            pipe_redirect_target = pipe_mtvec_target;
+        end
 
-                    F3_BNE:
-                        pipe_branch_taken =
-                            (forwarded_rs1_data != forwarded_rs2_data);
+        else begin
+            case (id_ex_instruction[6:0])
 
-                    F3_BLT:
-                        pipe_branch_taken =
-                            ($signed(forwarded_rs1_data) <
-                             $signed(forwarded_rs2_data));
+                OP_B: begin
+                    case (id_ex_funct3)
+                        F3_BEQ:
+                            pipe_branch_taken =
+                                (forwarded_rs1_data == forwarded_rs2_data);
 
-                    F3_BGE:
-                        pipe_branch_taken =
-                            ($signed(forwarded_rs1_data) >=
-                             $signed(forwarded_rs2_data));
+                        F3_BNE:
+                            pipe_branch_taken =
+                                (forwarded_rs1_data != forwarded_rs2_data);
 
-                    F3_BLTU:
-                        pipe_branch_taken =
-                            (forwarded_rs1_data < forwarded_rs2_data);
+                        F3_BLT:
+                            pipe_branch_taken =
+                                ($signed(forwarded_rs1_data) <
+                                 $signed(forwarded_rs2_data));
 
-                    F3_BGEU:
-                        pipe_branch_taken =
-                            (forwarded_rs1_data >= forwarded_rs2_data);
+                        F3_BGE:
+                            pipe_branch_taken =
+                                ($signed(forwarded_rs1_data) >=
+                                 $signed(forwarded_rs2_data));
 
-                    default:
-                        pipe_branch_taken = 1'b0;
-                endcase
+                        F3_BLTU:
+                            pipe_branch_taken =
+                                (forwarded_rs1_data < forwarded_rs2_data);
 
-                if (pipe_branch_taken) begin
+                        F3_BGEU:
+                            pipe_branch_taken =
+                                (forwarded_rs1_data >= forwarded_rs2_data);
+
+                        default:
+                            pipe_branch_taken = 1'b0;
+                    endcase
+
+                    if (pipe_branch_taken) begin
+                        pipe_redirect_valid  = 1'b1;
+                        pipe_redirect_target = id_ex_pc + id_ex_imm;
+                    end
+                end
+
+                OP_JAL: begin
                     pipe_redirect_valid  = 1'b1;
                     pipe_redirect_target = id_ex_pc + id_ex_imm;
                 end
-            end
 
-            OP_JAL: begin
-                pipe_redirect_valid  = 1'b1;
-                pipe_redirect_target = id_ex_pc + id_ex_imm;
-            end
+                OP_JALR: begin
+                    pipe_redirect_valid  = 1'b1;
+                    pipe_redirect_target = pipe_jalr_target;
+                end
 
-            OP_JALR: begin
-                pipe_redirect_valid  = 1'b1;
-                pipe_redirect_target =
-                    (forwarded_rs1_data + id_ex_imm) & ~32'b1;
-            end
+                OP_SYSTEM: begin
+                    if (pipe_mret_en) begin
+                        pipe_redirect_valid  = 1'b1;
+                        pipe_redirect_target = mepc_out;
+                    end
+                end
 
-            default: begin
-                pipe_redirect_valid  = 1'b0;
-                pipe_redirect_target = 32'b0;
-            end
-        endcase
+                default: begin
+                    pipe_redirect_valid  = 1'b0;
+                    pipe_redirect_target = 32'b0;
+                end
+
+            endcase
+        end
     end
 end
     // --------------------------------------------------------
@@ -975,17 +1247,42 @@ end
     csr_file u_csr_file (
         .clk              (clk),
         .rst_n            (rst_n),
-        .trap_en          (trap_en),
-        .mret_en          (mret_en),
-        .trap_cause       (trap_cause),
-        .trap_val         (trap_val),
-        .trap_pc          (pc),
+        .trap_en (
+            PIPELINE_ACTIVE ? pipe_trap_en : trap_en
+        ),
+
+        .mret_en (
+            PIPELINE_ACTIVE ? pipe_mret_en : mret_en
+        ),
+
+        .trap_cause (
+            PIPELINE_ACTIVE ? pipe_trap_cause : trap_cause
+        ),
+
+        .trap_val (
+            PIPELINE_ACTIVE ? pipe_trap_val : trap_val
+        ),
+
+        .trap_pc (
+            PIPELINE_ACTIVE ? pipe_trap_pc : pc
+        ),
         .irq_m_timer      (irq_m_timer),
-        .csr_addr         (if_id_instruction[31:20]),
+        .csr_addr (
+            PIPELINE_ACTIVE
+                ? id_ex_instruction[31:20]
+                : if_id_instruction[31:20]
+        ),
         .csr_wdata        (csr_wdata),
         .csr_op           (csr_op),
-        .csr_write_en     (csr_write_en),
+        .csr_write_en (
+            PIPELINE_ACTIVE ? 1'b0 : csr_write_en
+        ),
         .instret_en       (instret_en),
+
+        .pipe_csr_write_en (pipe_csr_commit_en),
+        .pipe_csr_addr     (pipe_csr_commit_addr),
+        .pipe_csr_wdata    (pipe_csr_commit_data),
+
         .csr_rdata        (csr_rdata),
         .mtvec_out        (mtvec_out),
         .mepc_out         (mepc_out),
@@ -1031,6 +1328,25 @@ end
     end
 
     always @(*) begin
+        case (ex_mem_alu_result[1:0])
+            2'b01:
+                pipe_load_data_formatted =
+                    {dmem_read_data[7:0], dmem_data_buf[31:8]};
+
+            2'b10:
+                pipe_load_data_formatted =
+                    {dmem_read_data[15:0], dmem_data_buf[31:16]};
+
+            2'b11:
+                pipe_load_data_formatted =
+                    {dmem_read_data[23:0], dmem_data_buf[31:24]};
+
+            default:
+                pipe_load_data_formatted = dmem_read_data;
+        endcase
+    end
+
+    always @(*) begin
         case (funct3)
             F3_LB:   load_data_formatted = {{24{load_byte[7]}}, load_byte};
             F3_LBU:  load_data_formatted = {24'b0, load_byte};
@@ -1044,17 +1360,73 @@ end
                                         : (jump ? pc_plus4 : alu_result_reg);
 
     // --------------------------------------------------------
+    // Pipeline cross-word memory access tracking
+    //
+    // state 0 : first word access
+    // state 1 : second word access
+    // state 2 : both accesses complete, allow pipeline to advance
+    // --------------------------------------------------------
+    assign pipe_cross_access =
+        PIPELINE_ACTIVE &&
+        ex_mem_valid &&
+        (ex_mem_mem_read || ex_mem_mem_write) &&
+        (
+            ((ex_mem_funct3 == F3_LW || ex_mem_funct3 == F3_SW) &&
+            (ex_mem_alu_result[1:0] != 2'b00))
+            ||
+            ((ex_mem_funct3 == F3_LH ||
+            ex_mem_funct3 == F3_LHU ||
+            ex_mem_funct3 == F3_SH) &&
+            (ex_mem_alu_result[1:0] == 2'b11))
+        );
+
+    assign pipe_mem_second_pass =
+        (pipe_cross_state == 2'd1);
+
+    assign mem_second_pass =
+    PIPELINE_ACTIVE ? pipe_mem_second_pass
+                    : in_second_pass;
+
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            pipe_cross_state <= 2'd0;
+        end
+        else if (!PIPELINE_ACTIVE) begin
+            pipe_cross_state <= 2'd0;
+        end
+        else if (!pipe_cross_access) begin
+            pipe_cross_state <= 2'd0;
+        end
+        else begin
+            case (pipe_cross_state)
+                2'd0:    pipe_cross_state <= 2'd1;
+                2'd1:    pipe_cross_state <= 2'd2;
+                default: pipe_cross_state <= 2'd0;
+            endcase
+        end
+    end
+
+    // --------------------------------------------------------
     // Synchronous DMEM load wait tracking
     // --------------------------------------------------------
-    always_ff @(posedge clk) begin
+        always_ff @(posedge clk) begin
         if (!rst_n) begin
             mem_load_wait <= 1'b0;
         end
         else if (PIPELINE_ACTIVE) begin
-            if (mem_load_wait)
+
+            // Cross-word accesses use pipe_cross_state instead.
+            if (pipe_cross_access) begin
                 mem_load_wait <= 1'b0;
-            else if (ex_mem_valid && ex_mem_mem_read)
+            end
+
+            else if (mem_load_wait) begin
+                mem_load_wait <= 1'b0;
+            end
+
+            else if (ex_mem_valid && ex_mem_mem_read) begin
                 mem_load_wait <= 1'b1;
+            end
         end
         else begin
             mem_load_wait <= 1'b0;
@@ -1064,8 +1436,11 @@ end
     assign pipe_mem_busy =
         PIPELINE_ACTIVE &&
         ex_mem_valid &&
-        ex_mem_mem_read &&
-        !mem_load_wait;
+        (
+            pipe_cross_access
+                ? (pipe_cross_state != 2'd2)
+                : (ex_mem_mem_read && !mem_load_wait)
+        );
     // --------------------------------------------------------
     // MEM-stage source selection
     // --------------------------------------------------------
@@ -1110,10 +1485,17 @@ end
     assign dmem_word_base = {mem_stage_addr[31:2], 2'b00};
 
     always @(*) begin
-        dmem_addr = in_second_pass ? (dmem_word_base + 32'd4) : dmem_word_base;
+        dmem_addr = mem_second_pass ? (dmem_word_base + 32'd4)
+                                    : dmem_word_base;
     end
 
-    assign dmem_write_en = mem_stage_write;
+    assign dmem_write_en =
+        mem_stage_write &&
+        !(PIPELINE_ACTIVE &&
+        pipe_cross_access &&
+        (pipe_cross_state == 2'd2));
+
+
     assign dmem_read_en  = mem_stage_read;
     assign branch_eq     = (rs1_data == rs2_data);
     assign branch_lt     = ($signed(rs1_data) < $signed(rs2_data));
@@ -1121,7 +1503,7 @@ end
 
     // Store write data — barrel-shifted to the correct byte lanes
     always @(*) begin
-        if (in_second_pass) begin
+        if (mem_second_pass) begin
             // Second pass: high bytes of rs2 shifted into the low lanes of word N+1
             case (mem_stage_funct3)
                 F3_SH:   dmem_write_data = {24'b0, mem_stage_store_data[15:8]};               // off==3 only
@@ -1154,7 +1536,7 @@ end
 
     // Byte enables
     always @(*) begin
-        if (in_second_pass) begin
+        if (mem_second_pass) begin
             // Second pass: remaining bytes in word N+1
             case (mem_stage_funct3)
                 F3_SH:   dmem_byte_enable = 4'b0001;                              // sh off==3: 1 byte

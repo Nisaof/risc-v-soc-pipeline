@@ -36,10 +36,48 @@ module pipeline_decode (
     logic [6:0] opcode;
     logic [2:0] funct3;
     logic [6:0] funct7;
+    logic [11:0] csr_addr;
+    logic        csr_addr_supported;
+    logic        csr_addr_read_only;
+    logic        csr_funct3_legal;
+    logic        csr_write_attempt;
 
     assign opcode = instruction[6:0];
     assign funct3 = instruction[14:12];
     assign funct7 = instruction[31:25];
+    assign csr_addr = instruction[31:20];
+
+    assign csr_addr_supported =
+        (csr_addr == CSR_MSTATUS)  ||
+        (csr_addr == CSR_MIE)      ||
+        (csr_addr == CSR_MTVEC)    ||
+        (csr_addr == CSR_MSCRATCH) ||
+        (csr_addr == CSR_MEPC)     ||
+        (csr_addr == CSR_MCAUSE)   ||
+        (csr_addr == CSR_MTVAL)    ||
+        (csr_addr == CSR_MIP)      ||
+        (csr_addr == CSR_MHARTID)  ||
+        (csr_addr == CSR_CYCLE)    ||
+        (csr_addr == CSR_INSTRET);
+
+    assign csr_addr_read_only =
+        (csr_addr == CSR_MIP)     ||
+        (csr_addr == CSR_MHARTID) ||
+        (csr_addr == CSR_CYCLE)   ||
+        (csr_addr == CSR_INSTRET);
+
+    assign csr_funct3_legal =
+        (funct3 == 3'b001) || (funct3 == 3'b010) ||
+        (funct3 == 3'b011) || (funct3 == 3'b101) ||
+        (funct3 == 3'b110) || (funct3 == 3'b111);
+
+    // CSRRW/CSRRWI always attempt a write. Set/clear variants write
+    // only when their rs1/zimm field is non-zero.
+    assign csr_write_attempt =
+        (funct3 == 3'b001) || (funct3 == 3'b101) ||
+        (((funct3 == 3'b010) || (funct3 == 3'b011) ||
+          (funct3 == 3'b110) || (funct3 == 3'b111)) &&
+         (instruction[19:15] != 5'd0));
 
     always @(*) begin
         // Safe defaults
@@ -268,9 +306,16 @@ module pipeline_decode (
         // ECALL / EBREAK / MRET
         // These do not perform a normal CSR rd write here.
         if (funct3 == 3'b000) begin
-            csr_en      = 1'b0;
-            csr_write   = 1'b0;
-            reg_write   = 1'b0;
+            if ((instruction != 32'h0000_0073) &&
+                (instruction != 32'h0010_0073) &&
+                (instruction != 32'h3020_0073)) begin
+                illegal_instruction = 1'b1;
+            end
+        end
+        else if (!csr_funct3_legal ||
+                 !csr_addr_supported ||
+                 (csr_addr_read_only && csr_write_attempt)) begin
+            illegal_instruction = 1'b1;
         end
         else begin
             // CSRRW / CSRRS / CSRRC

@@ -107,6 +107,14 @@ module tb_cpu_exceptions;
         encode_u = {imm[31:12], rd, opcode};
     endfunction
 
+    function automatic [31:0] encode_j(
+        input int           imm,
+        input logic [4:0]   rd,
+        input logic [6:0]   opcode
+    );
+        encode_j = {imm[20], imm[10:1], imm[11], imm[19:12], rd, opcode};
+    endfunction
+
     // csrw csr, rs1  =  csrrw x0, csr, rs1
     function automatic [31:0] encode_csrw(
         input logic [11:0] csr,
@@ -575,12 +583,57 @@ module tb_cpu_exceptions;
         check_dmem(2, invalid_store_instr, "DMEM[2] MTVAL invalid store");
         check_dmem(3, 32'hA5A5_5A5A, "DMEM[3] unchanged by invalid store");
 
+        // ==========================================================
+        // TEST 10: JAL to a two-byte-aligned target must trap because
+        // this core implements RV32I without the C extension.
+        // The faulting JAL is at 0x18 and targets 0x1a.
+        // ==========================================================
+
+        rst_n = 1'b0;
+        for (i = 0; i < 256; i++) begin imem[i] = 32'h0000_0013; dmem[i] = 0; end
+
+        imem[0]  = encode_u(0, 5'd7, OP_AUIPC);
+        imem[1]  = encode_i(48, 5'd7, F3_ADD_SUB, 5'd7, OP_I_ALU);
+        imem[2]  = encode_csrw(CSR_MTVEC, 5'd7);
+        imem[3]  = encode_u(32'h20000000, 5'd5, OP_LUI);
+        imem[4]  = encode_i(85, 5'd0, F3_ADD_SUB, 5'd9, OP_I_ALU);
+        imem[5]  = encode_i(0, 5'd0, F3_ADD_SUB, 5'd12, OP_I_ALU);
+        imem[6]  = encode_j(2, 5'd9, OP_JAL);                          // 0x18 -> 0x1a
+        imem[7]  = encode_i(1, 5'd12, F3_ADD_SUB, 5'd12, OP_I_ALU);  // execute once after MRET
+        imem[8]  = encode_i(170, 5'd0, F3_ADD_SUB, 5'd10, OP_I_ALU);
+        imem[9]  = encode_s(0, 5'd10, 5'd5, F3_SW, OP_S);
+        imem[10] = 32'h0000_006F;
+
+        imem[12] = encode_csrr(5'd27, CSR_MEPC);                      // preserve faulting PC
+        imem[13] = encode_i(4, 5'd27, F3_ADD_SUB, 5'd28, OP_I_ALU);
+        imem[14] = encode_csrw(CSR_MEPC, 5'd28);
+        imem[15] = encode_csrr(5'd29, CSR_MCAUSE);
+        imem[16] = encode_s(4, 5'd29, 5'd5, F3_SW, OP_S);
+        imem[17] = encode_csrr(5'd30, CSR_MTVAL);
+        imem[18] = encode_s(8, 5'd30, 5'd5, F3_SW, OP_S);
+        imem[19] = 32'h3020_0073;
+
+        @(posedge clk); @(posedge clk);
+        rst_n = 1'b1;
+        repeat (220) @(posedge clk);
+
+        $display("--- Test 10: JAL to misaligned address ---");
+        check_reg(5'd9,  32'd85,        "x9 JAL link register unchanged");
+        check_reg(5'd12, 32'd1,         "x12 younger instruction executes exactly once");
+        check_reg(5'd27, 32'h0000_0018, "x27 MEPC faulting JAL PC");
+        check_reg(5'd29, EXC_FETCH_MISALIGN, "x29 MCAUSE JAL fetch-misalign");
+        check_reg(5'd30, 32'h0000_001A, "x30 MTVAL JAL target");
+        check_reg(5'd10, 32'd170,       "x10 post-MRET execution");
+        check_dmem(0, 32'd170,          "DMEM[0] post-MRET store");
+        check_dmem(1, EXC_FETCH_MISALIGN, "DMEM[1] JAL MCAUSE");
+        check_dmem(2, 32'h0000_001A,    "DMEM[2] JAL MTVAL");
+
         if (error_count != 0) begin
             $display("CPU exception test FAILED: %0d error(s).", error_count);
             $fatal(1);
         end
 
-        $display("CPU exception test passed (50 checks).");
+        $display("CPU exception test passed (59 checks).");
         $finish;
     end
 

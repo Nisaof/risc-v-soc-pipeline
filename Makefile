@@ -174,6 +174,63 @@ sim_cpu_csr:
 		tb/core/tb_cpu_csr.sv
 	vvp sim_cpu_csr.vvp
 
+# --- CPU Precise Trap Directed Regression ---
+sim_cpu_precise_trap:
+	iverilog -g2012 -o sim_cpu_precise_trap.vvp \
+		rtl/core/alu_ops.sv \
+		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
+		rtl/core/alu.sv \
+		rtl/core/mdu.sv \
+		rtl/core/register_file.sv \
+		rtl/core/imm_gen.sv \
+		rtl/core/csr_file.sv \
+		rtl/core/control_unit.sv \
+		rtl/core/datapath.sv \
+		rtl/core/cpu.sv \
+		tb/core/tb_cpu_precise_trap.sv
+	vvp sim_cpu_precise_trap.vvp
+
+# --- CPU SYSTEM/CSR Legality Directed Regression ---
+sim_cpu_system_legality:
+	iverilog -g2012 -o sim_cpu_system_legality.vvp \
+		rtl/core/alu_ops.sv \
+		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
+		rtl/core/alu.sv \
+		rtl/core/mdu.sv \
+		rtl/core/register_file.sv \
+		rtl/core/imm_gen.sv \
+		rtl/core/csr_file.sv \
+		rtl/core/control_unit.sv \
+		rtl/core/datapath.sv \
+		rtl/core/cpu.sv \
+		tb/core/tb_cpu_system_legality.sv
+	vvp sim_cpu_system_legality.vvp
+
+# --- CPU Pipeline Counter Directed Regression ---
+sim_cpu_counters:
+	iverilog -g2012 -o sim_cpu_counters.vvp \
+		rtl/core/alu_ops.sv \
+		rtl/core/riscv_pkg.sv \
+		rtl/core/pipeline_decode.sv \
+		rtl/core/pipeline_control.sv \
+		rtl/core/forwarding_unit.sv \
+		rtl/core/alu.sv \
+		rtl/core/mdu.sv \
+		rtl/core/register_file.sv \
+		rtl/core/imm_gen.sv \
+		rtl/core/csr_file.sv \
+		rtl/core/control_unit.sv \
+		rtl/core/datapath.sv \
+		rtl/core/cpu.sv \
+		tb/core/tb_cpu_counters.sv
+	vvp sim_cpu_counters.vvp
+
 # --- IMEM Simulation ---
 sim_imem:
 	iverilog -g2012 -o sim_imem.vvp \

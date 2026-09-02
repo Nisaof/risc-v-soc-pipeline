@@ -127,6 +127,7 @@ module datapath #(
     logic        pipe_csr_commit_en;
     logic [11:0] pipe_csr_commit_addr;
     logic [31:0] pipe_csr_commit_data;
+    logic        pipe_instret_en;
 
     logic [31:0] pipe_alu_operand_a;
     logic [31:0] pipe_alu_operand_b;
@@ -147,10 +148,14 @@ module datapath #(
     logic        pipe_redirect_valid;
     logic [31:0] pipe_redirect_target;
     logic [31:0] pipe_mtvec_target;
+    logic [31:0] pipe_mepc_target;
+    logic [31:0] pipe_jal_target;
     logic [31:0] pipe_jalr_target;
     logic [31:0] pipe_branch_target;
     logic        pipe_trap_en;
     logic        pipe_mret_en;
+    logic        pipe_trap_accept;
+    logic        pipe_mret_accept;
     logic [31:0] pipe_trap_cause;
     logic [31:0] pipe_trap_val;
     logic [31:0] pipe_trap_pc;
@@ -201,7 +206,7 @@ module datapath #(
         fetch_hold_pc            <= 32'b0;
         fetch_hold_pc_plus4      <= 32'b0;
         fetch_hold_instruction   <= 32'b0;
-        fetch_discard_q          <= 1'b0;
+        fetch_discard_q          <= 1'b1;
     end
 
     else begin
@@ -522,7 +527,10 @@ end
         end
 
         else if (pipe_ex_mem_en) begin
-            ex_mem_valid       <= id_ex_valid;
+            // A trap accepted for the instruction currently in EX must
+            // not let that instruction carry side effects into EX/MEM.
+            // Older EX/MEM state still advances independently to MEM/WB.
+            ex_mem_valid       <= id_ex_valid && !pipe_trap_accept;
             ex_mem_instruction <= id_ex_instruction;
             ex_mem_pc_plus4    <= id_ex_pc_plus4;
             ex_mem_alu_result  <= pipe_ex_result;
@@ -816,7 +824,14 @@ end
             ? {27'b0, id_ex_instruction[19:15]}
             : forwarded_rs1_data;
 
-    assign pipe_csr_old_value = csr_rdata;
+    // An INSTRET read in EX is ordered after the valid instructions already
+    // in EX/MEM and MEM/WB. They have not updated minstret_reg yet, but they
+    // are older than the CSR read and will retire before it.
+    assign pipe_csr_old_value =
+        (PIPELINE_ACTIVE && id_ex_valid && id_ex_csr_en &&
+         (id_ex_instruction[31:20] == CSR_INSTRET))
+            ? csr_rdata + {31'b0, ex_mem_valid} + {31'b0, mem_wb_valid}
+            : csr_rdata;
 
     always @(*) begin
         case (id_ex_csr_op)
@@ -869,6 +884,12 @@ end
 
     assign pipe_csr_commit_data =
         mem_wb_csr_new_value;
+
+    // The instruction currently in MEM/WB retires on an enabled pipeline
+    // advance. Gating with the stage enable prevents a held valid entry from
+    // being counted again on every memory or MDU stall cycle.
+    assign pipe_instret_en =
+        mem_wb_valid && pipe_mem_wb_en;
     // --------------------------------------------------------
     // Register-file write-back selection
     // --------------------------------------------------------
@@ -1021,8 +1042,19 @@ assign pipe_mdu_start =
         ? {pipe_csr_commit_data[31:2], 2'b00}
         : mtvec_out;
 
+    assign pipe_mepc_target =
+    (ex_mem_valid && ex_mem_csr_en && ex_mem_csr_write &&
+     (ex_mem_instruction[31:20] == CSR_MEPC))
+        ? {ex_mem_csr_new_value[31:2], 2'b00}
+        : (pipe_csr_commit_en && (pipe_csr_commit_addr == CSR_MEPC))
+            ? {pipe_csr_commit_data[31:2], 2'b00}
+            : mepc_out;
+
     assign pipe_jalr_target =
     (forwarded_rs1_data + id_ex_imm) & ~32'b1;
+
+    assign pipe_jal_target =
+    id_ex_pc + id_ex_imm;
 
     assign pipe_branch_target =
     id_ex_pc + id_ex_imm;
@@ -1044,18 +1076,26 @@ always @(*) begin
     pipe_trap_cause = EXC_M_TIMER_IRQ;
     pipe_trap_val   = 32'b0;
 
-    // For an asynchronous interrupt, save the oldest
-    // not-yet-retired pipeline instruction as the resume PC.
-    if (ex_mem_valid)
-        pipe_trap_pc = ex_mem_pc_plus4 - 32'd4;
-    else
-        pipe_trap_pc = id_ex_pc;
+    // Older EX/MEM state is allowed to complete. The current EX
+    // instruction is squashed on trap acceptance and is therefore
+    // the first instruction that must be restarted after MRET.
+    pipe_trap_pc = id_ex_pc;
 end
 
 else if (id_ex_valid && id_ex_illegal_instruction) begin
     pipe_trap_en    = 1'b1;
     pipe_trap_cause = EXC_ILLEGAL_INSTR;
     pipe_trap_val   = id_ex_instruction;
+    pipe_trap_pc    = id_ex_pc;
+end
+
+else if (id_ex_valid &&
+         (id_ex_instruction[6:0] == OP_JAL) &&
+         pipe_jal_target[1]) begin
+
+    pipe_trap_en    = 1'b1;
+    pipe_trap_cause = EXC_FETCH_MISALIGN;
+    pipe_trap_val   = pipe_jal_target;
     pipe_trap_pc    = id_ex_pc;
 end
 
@@ -1191,7 +1231,7 @@ always @(*) begin
                 OP_SYSTEM: begin
                     if (pipe_mret_en) begin
                         pipe_redirect_valid  = 1'b1;
-                        pipe_redirect_target = mepc_out;
+                        pipe_redirect_target = pipe_mepc_target;
                     end
                 end
 
@@ -1250,11 +1290,11 @@ end
         .clk              (clk),
         .rst_n            (rst_n),
         .trap_en (
-            PIPELINE_ACTIVE ? pipe_trap_en : trap_en
+            PIPELINE_ACTIVE ? pipe_trap_accept : trap_en
         ),
 
         .mret_en (
-            PIPELINE_ACTIVE ? pipe_mret_en : mret_en
+            PIPELINE_ACTIVE ? pipe_mret_accept : mret_en
         ),
 
         .trap_cause (
@@ -1279,7 +1319,9 @@ end
         .csr_write_en (
             PIPELINE_ACTIVE ? 1'b0 : csr_write_en
         ),
-        .instret_en       (instret_en),
+        .instret_en (
+            PIPELINE_ACTIVE ? pipe_instret_en : instret_en
+        ),
 
         .pipe_csr_write_en (pipe_csr_commit_en),
         .pipe_csr_addr     (pipe_csr_commit_addr),
@@ -1474,6 +1516,13 @@ end
                 ? (pipe_cross_state != 2'd2)
                 : (ex_mem_mem_read && !mem_load_wait)
         );
+
+    // Trap/MRET detection happens in EX, but architectural CSR state may
+    // change only when an older memory operation is no longer holding the
+    // pipeline. The ID/EX request remains present throughout that hold.
+    // Redirects intentionally retain their existing priority over MDU busy.
+    assign pipe_trap_accept = pipe_trap_en && !pipe_mem_busy;
+    assign pipe_mret_accept = pipe_mret_en && !pipe_mem_busy;
     // --------------------------------------------------------
     // MEM-stage source selection
     // --------------------------------------------------------

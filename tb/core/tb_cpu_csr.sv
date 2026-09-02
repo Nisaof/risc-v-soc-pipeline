@@ -10,7 +10,7 @@
 // Test 2: Timer interrupt
 //   Enables MTIE + MIE, spins on a NOP.  Testbench asserts
 //   irq_m_timer.  Handler stores MCAUSE, clears MTIE, sets
-//   MEPC+4, and MRET.  Execution continues past the spin NOP.
+//   original MEPC, and MRET.  The interrupted instruction resumes.
 // ============================================================
 
 import riscv_pkg::*;
@@ -223,8 +223,8 @@ module tb_cpu_csr;
         //  [5]  0x14  csrw  mie, x6         MIE.MTIE = 1
         //  [6]  0x18  addi  x6, x0, 8      x6 = 0x8  (global MIE)
         //  [7]  0x1C  csrw  mstatus, x6    MSTATUS.MIE = 1
-        //  [8]  0x20  nop                  ← irq_m_timer fired here
-        //  [9]  0x24  addi  x10, x0, 204  x10 = 0xCC (post-interrupt)
+        //  [8]  0x20  addi  x10, x0, 203  x10 = 0xCB (older instruction)
+        //  [9]  0x24  addi  x10, x10, 1   x10 = 0xCC exactly once after MRET
         // [10]  0x28  sw    x10, 4(x5)    DMEM[1] = 0xCC
         // [11]  0x2C  jal   x0, 0         spin
         // [12-19]     nop padding to 0x50
@@ -233,9 +233,9 @@ module tb_cpu_csr;
         // [20]  0x50  csrr  x29, mcause   x29 = 0x80000007
         // [21]  0x54  sw    x29, 0(x5)    DMEM[0] = 0x80000007
         // [22]  0x58  csrw  mie, x0        clear MTIE
-        // [23]  0x5C  csrr  x28, mepc      x28 = 0x20  (interrupted NOP)
-        // [24]  0x60  addi  x28, x28, 4   x28 = 0x24
-        // [25]  0x64  csrw  mepc, x28      MEPC = 0x24
+        // [23]  0x5C  csrr  x28, mepc      x28 = 0x24  (interrupted ADDI)
+        // [24]  0x60  nop                  preserve MEPC
+        // [25]  0x64  nop                  preserve MEPC
         // [26]  0x68  mret               PC = 0x24
         // ===========================================================
 
@@ -252,9 +252,8 @@ module tb_cpu_csr;
         imem[5]  = encode_csrw(CSR_MIE, 5'd6);
         imem[6]  = encode_i(8, 5'd0, F3_ADD_SUB, 5'd6, OP_I_ALU);
         imem[7]  = encode_csrw(CSR_MSTATUS, 5'd6);
-        // [8] 0x20 = NOP (already initialized)
-
-        imem[9]  = encode_i(204, 5'd0, F3_ADD_SUB, 5'd10, OP_I_ALU);
+        imem[8]  = encode_i(203, 5'd0,  F3_ADD_SUB, 5'd10, OP_I_ALU);
+        imem[9]  = encode_i(1,   5'd10, F3_ADD_SUB, 5'd10, OP_I_ALU);
         imem[10] = encode_s(4, 5'd10, 5'd5, F3_SW, OP_S);
         imem[11] = 32'h0000_006F;                                    // jal x0,0
         // [12-19] remain NOPs
@@ -263,8 +262,7 @@ module tb_cpu_csr;
         imem[21] = encode_s(0, 5'd29, 5'd5, F3_SW, OP_S);
         imem[22] = encode_csrw(CSR_MIE, 5'd0);
         imem[23] = encode_csrr(5'd28, CSR_MEPC);
-        imem[24] = encode_i(4, 5'd28, F3_ADD_SUB, 5'd28, OP_I_ALU);
-        imem[25] = encode_csrw(CSR_MEPC, 5'd28);
+        // [24-25] remain NOPs so MRET uses the original interrupted MEPC.
         imem[26] = 32'h3020_0073;                                    // mret
 
         @(posedge clk);
@@ -272,7 +270,9 @@ module tb_cpu_csr;
         rst_n = 1'b1;
 
         // Pipeline version:
-        // assert the timer IRQ when the NOP at PC=0x20 reaches ID/EX.
+        // Assert the timer IRQ while the older setup ADDI at PC=0x20 is
+        // in ID/EX. Interrupt enable becomes effective one cycle later,
+        // when the interrupted increment at PC=0x24 is in ID/EX.
         wait (
             dut.u_datapath.id_ex_valid &&
             dut.u_datapath.id_ex_pc == 32'h0000_0020
@@ -284,8 +284,8 @@ module tb_cpu_csr;
         repeat (250) @(posedge clk);
 
         $display("--- Test 2: Timer interrupt ---");
-        check_reg(5'd10, 32'd204,        "x10 post-interrupt");
-        check_reg(5'd28, 32'h0000_0024,  "x28 MEPC+4 = 0x24");
+        check_reg(5'd10, 32'd204,        "x10 interrupted increment executed exactly once");
+        check_reg(5'd28, 32'h0000_0024,  "x28 interrupted MEPC = 0x24");
         check_reg(5'd29, 32'h8000_0007,  "x29 MCAUSE timer IRQ");
         check_dmem(0,    32'h8000_0007,  "DMEM[0] MCAUSE timer IRQ");
         check_dmem(1,    32'd204,        "DMEM[1] post-interrupt store");

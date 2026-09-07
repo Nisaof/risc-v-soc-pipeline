@@ -379,36 +379,16 @@ always_ff @(posedge clk) begin
         // Branch/jump redirect or load-use bubble:
         // invalidate the instruction entering EX.
         if (flush_id_ex || bubble_id_ex) begin
-            id_ex_valid         <= 1'b0;
-            id_ex_instruction   <= 32'b0;
-            id_ex_pc            <= 32'b0;
-            id_ex_pc_plus4      <= 32'b0;
-            id_ex_rs1_data      <= 32'b0;
-            id_ex_rs2_data      <= 32'b0;
-            id_ex_imm           <= 32'b0;
-            id_ex_rs1           <= 5'b0;
-            id_ex_rs2           <= 5'b0;
-            id_ex_rd            <= 5'b0;
-            id_ex_funct3        <= 3'b0;
-            id_ex_mdu_en        <= 1'b0;
-            id_ex_csr_en      <= 1'b0;
-            id_ex_csr_write   <= 1'b0;
-            id_ex_csr_op      <= 2'b00;
-            id_ex_csr_use_imm <= 1'b0;
-            id_ex_illegal_instruction <= 1'b0;
-
-            id_ex_alu_operation <= 5'b0;
-            id_ex_alu_src_a_sel <= 2'b0;
-            id_ex_alu_src_b     <= 1'b0;
-            id_ex_reg_write     <= 1'b0;
-            id_ex_mem_read      <= 1'b0;
-            id_ex_mem_write     <= 1'b0;
-            id_ex_mem_to_reg    <= 1'b0;
-            id_ex_jump          <= 1'b0;
+            id_ex_valid <= 1'b0;
         end
-
         else if (pipe_id_ex_en) begin
             id_ex_valid         <= if_id_valid;
+        end
+
+        // Payload needs only the memory/MDU hold conditions. A flush or
+        // bubble may capture discarded decode data: valid is cleared above.
+        // Do not use pipe_id_ex_en here; its MDU override depends on redirect.
+        if (!pipe_mem_busy && !pipe_mdu_stall) begin
             id_ex_instruction   <= if_id_instruction;
             id_ex_pc            <= if_id_pc;
             id_ex_pc_plus4      <= if_id_pc_plus4;
@@ -1061,8 +1041,43 @@ assign pipe_mdu_start =
 // --------------------------------------------------------
 // Pipeline SYSTEM / trap control
 // --------------------------------------------------------
+// Request generation is independent of the cause/value priority mux below.
+// All priority arms that request a trap set the same enable, so their OR
+// preserves acceptance even when IRQ/illegal overlaps an instruction class.
+logic pipe_trap_independent_req;
+logic pipe_trap_operand_req;
+logic pipe_jalr_misaligned_req;
+logic pipe_branch_misaligned_req;
+
+assign pipe_jalr_misaligned_req =
+    id_ex_valid && (id_ex_instruction[6:0] == OP_JALR) &&
+    pipe_jalr_target[1];
+
+assign pipe_branch_misaligned_req =
+    id_ex_valid &&
+         (id_ex_instruction[6:0] == OP_B) &&
+         (
+             ((id_ex_funct3 == F3_BEQ)  && (forwarded_rs1_data == forwarded_rs2_data)) ||
+             ((id_ex_funct3 == F3_BNE)  && (forwarded_rs1_data != forwarded_rs2_data)) ||
+             ((id_ex_funct3 == F3_BLT)  && ($signed(forwarded_rs1_data) <  $signed(forwarded_rs2_data))) ||
+             ((id_ex_funct3 == F3_BGE)  && ($signed(forwarded_rs1_data) >= $signed(forwarded_rs2_data))) ||
+             ((id_ex_funct3 == F3_BLTU) && (forwarded_rs1_data <  forwarded_rs2_data)) ||
+             ((id_ex_funct3 == F3_BGEU) && (forwarded_rs1_data >= forwarded_rs2_data))
+         ) &&
+         pipe_branch_target[1];
+
+assign pipe_trap_independent_req = id_ex_valid && (
+    irq_pending || id_ex_illegal_instruction ||
+    ((id_ex_instruction[6:0] == OP_JAL) && pipe_jal_target[1]) ||
+    ((id_ex_instruction[6:0] == OP_SYSTEM) && (id_ex_funct3 == 3'b000) &&
+     ((id_ex_instruction[31:20] == 12'h000) ||
+      (id_ex_instruction[31:20] == 12'h001))));
+
+assign pipe_trap_operand_req =
+    pipe_jalr_misaligned_req || pipe_branch_misaligned_req;
+assign pipe_trap_en = pipe_trap_independent_req || pipe_trap_operand_req;
+
 always @(*) begin
-    pipe_trap_en    = 1'b0;
     pipe_mret_en    = 1'b0;
     pipe_trap_cause = 32'b0;
     pipe_trap_val   = 32'b0;
@@ -1072,7 +1087,6 @@ always @(*) begin
     // The instruction currently in EX is the interrupted
     // instruction and will be flushed/restarted via MEPC.
     if (id_ex_valid && irq_pending) begin
-    pipe_trap_en    = 1'b1;
     pipe_trap_cause = EXC_M_TIMER_IRQ;
     pipe_trap_val   = 32'b0;
 
@@ -1083,7 +1097,6 @@ always @(*) begin
 end
 
 else if (id_ex_valid && id_ex_illegal_instruction) begin
-    pipe_trap_en    = 1'b1;
     pipe_trap_cause = EXC_ILLEGAL_INSTR;
     pipe_trap_val   = id_ex_instruction;
     pipe_trap_pc    = id_ex_pc;
@@ -1092,36 +1105,18 @@ end
 else if (id_ex_valid &&
          (id_ex_instruction[6:0] == OP_JAL) &&
          pipe_jal_target[1]) begin
-
-    pipe_trap_en    = 1'b1;
     pipe_trap_cause = EXC_FETCH_MISALIGN;
     pipe_trap_val   = pipe_jal_target;
     pipe_trap_pc    = id_ex_pc;
 end
 
-else if (id_ex_valid &&
-         (id_ex_instruction[6:0] == OP_JALR) &&
-         pipe_jalr_target[1]) begin
-
-    pipe_trap_en    = 1'b1;
+else if (pipe_jalr_misaligned_req) begin
     pipe_trap_cause = EXC_FETCH_MISALIGN;
     pipe_trap_val   = pipe_jalr_target;
     pipe_trap_pc    = id_ex_pc;
 end
 
-else if (id_ex_valid &&
-         (id_ex_instruction[6:0] == OP_B) &&
-         (
-             ((id_ex_funct3 == F3_BEQ)  && (forwarded_rs1_data == forwarded_rs2_data)) ||
-             ((id_ex_funct3 == F3_BNE)  && (forwarded_rs1_data != forwarded_rs2_data)) ||
-             ((id_ex_funct3 == F3_BLT)  && ($signed(forwarded_rs1_data) <  $signed(forwarded_rs2_data))) ||
-             ((id_ex_funct3 == F3_BGE)  && ($signed(forwarded_rs1_data) >= $signed(forwarded_rs2_data))) ||
-             ((id_ex_funct3 == F3_BLTU) && (forwarded_rs1_data <  forwarded_rs2_data)) ||
-             ((id_ex_funct3 == F3_BGEU) && (forwarded_rs1_data >= forwarded_rs2_data))
-         ) &&
-         pipe_branch_target[1]) begin
-
-    pipe_trap_en    = 1'b1;
+else if (pipe_branch_misaligned_req) begin
     pipe_trap_cause = EXC_FETCH_MISALIGN;
     pipe_trap_val   = pipe_branch_target;
     pipe_trap_pc    = id_ex_pc;
@@ -1135,7 +1130,6 @@ else if (id_ex_valid &&
 
             12'h000: begin
                 // ECALL from M-mode
-                pipe_trap_en    = 1'b1;
                 pipe_trap_cause = EXC_ECALL_M;
                 pipe_trap_val   = 32'b0;
                 pipe_trap_pc    = id_ex_pc;
@@ -1143,7 +1137,6 @@ else if (id_ex_valid &&
 
             12'h001: begin
                 // EBREAK
-                pipe_trap_en    = 1'b1;
                 pipe_trap_cause = EXC_EBREAK;
                 pipe_trap_val   = 32'b0;
                 pipe_trap_pc    = id_ex_pc;

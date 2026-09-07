@@ -34,6 +34,11 @@ SW_DIR         = sw
 # Default matches the Vivado project's auto-generated run directory name.
 # Override with: make update_bitstream PROG=... VIVADO_IMPL_DIR=path/to/impl_1
 VIVADO_IMPL_DIR ?= impl_1
+VIVADO          ?= vivado
+FPGA_BUILD_DIR  ?= build/fpga
+FPGA_BUILD_TCL  ?= fpga/build.tcl
+FPGA_BUILD_WIN  ?= fpga/build_win.ps1
+POWERSHELL      ?= powershell.exe
 
 # --- Default target ---
 # Runs when you type 'make' with no arguments
@@ -691,6 +696,43 @@ compile_bootloader:
 		sw/tests/bootloader.bin \
 		sw/tests/bootloader.mem
 	@echo "Bootloader compiled successfully"
+
+# --- Nexys A7-100T Vivado batch build ---
+.PHONY: fpga_bootloader fpga_synth fpga_synth_win fpga_build
+
+fpga_bootloader: compile_bootloader
+	@test -f sw/tests/bootloader.mem || { \
+		echo "ERROR: sw/tests/bootloader.mem was not generated"; \
+		exit 1; \
+	}
+
+fpga_synth: fpga_bootloader
+	@command -v $(VIVADO) >/dev/null 2>&1 || { \
+		echo "ERROR: Vivado executable '$(VIVADO)' is not available on PATH"; \
+		exit 1; \
+	}
+	@mkdir -p $(FPGA_BUILD_DIR)
+	$(VIVADO) -mode batch -nojournal \
+		-log $(FPGA_BUILD_DIR)/vivado_synth.log \
+		-source $(FPGA_BUILD_TCL) -tclargs synth
+
+fpga_synth_win: fpga_bootloader
+	@command -v $(POWERSHELL) >/dev/null 2>&1 || { \
+		echo "ERROR: Windows PowerShell is not available from WSL"; \
+		exit 1; \
+	}
+	$(POWERSHELL) -NoProfile -ExecutionPolicy Bypass \
+		-File "$$(wslpath -w $(FPGA_BUILD_WIN))" -Mode synth
+
+fpga_build: fpga_bootloader
+	@command -v $(VIVADO) >/dev/null 2>&1 || { \
+		echo "ERROR: Vivado executable '$(VIVADO)' is not available on PATH"; \
+		exit 1; \
+	}
+	@mkdir -p $(FPGA_BUILD_DIR)
+	$(VIVADO) -mode batch -nojournal \
+		-log $(FPGA_BUILD_DIR)/vivado_build.log \
+		-source $(FPGA_BUILD_TCL) -tclargs build
 
 # --- Fast bitstream patching via updatemem ---
 # Usage: make update_bitstream PROG=sw/tests/<name>.elf

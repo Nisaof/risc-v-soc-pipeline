@@ -7,7 +7,7 @@
 //   - Total cycles
 //   - Total instructions retired
 //   - Effective CPI  = cycles / instructions
-//   - Effective MIPS = (instructions / cycles) * 100  (at 100 MHz)
+//   - Effective MIPS = (instructions / cycles) * 90  (at 90 MHz)
 //
 // Build: make compile_benchmark
 // ============================================================
@@ -105,11 +105,11 @@ int main(void)
         uart_uint(cpi_frac);
         uart_str("\r\n");
 
-        // MIPS at 100 MHz = (instructions / cycles) * 100
-        // = instructions * 100 / cycles
-        unsigned int mips_int  = instrs * 100u / cycles;
-        unsigned int mips_frac = (instrs * 100u % cycles) * 10u / cycles;
-        uart_str("MIPS @ 100 MHz  : ");
+        // MIPS at 90 MHz = (instructions / cycles) * 90
+        // = instructions * 90 / cycles
+        unsigned int mips_int  = instrs * 90u / cycles;
+        unsigned int mips_frac = (instrs * 90u % cycles) * 10u / cycles;
+        uart_str("MIPS @ 90 MHz   : ");
         uart_uint(mips_int);
         uart_putc('.');
         uart_uint(mips_frac);

@@ -45,7 +45,7 @@ if {$mode eq "strategy"} {
     puts "INFO: Running implementation strategy '$strategy'"
     if {$strategy eq "explore"} {
         open_checkpoint $synth_checkpoint
-        opt_design
+        opt_design -directive NoBramPowerOpt
         place_design -directive Explore
         phys_opt_design -directive AggressiveExplore
         write_checkpoint -force [file join $strategy_dir post_place.dcp]
@@ -156,7 +156,7 @@ if {$mode eq "synth"} {
 }
 
 puts "INFO: Running implementation"
-opt_design
+opt_design -directive NoBramPowerOpt
 place_design
 phys_opt_design
 route_design

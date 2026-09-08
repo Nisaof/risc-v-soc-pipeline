@@ -28,7 +28,7 @@ int main(void)
         // target — safe because the counter only increases monotonically.
         timer_clear();
         timer_set(0xFFFFFFFF);
-        while (timer_read() < 50000000) {}
+        while (timer_read() < 45000000) {}
 
         // --- Step 4b: Toggle LEDs ---
         static unsigned int led_state = 0xFFFF;

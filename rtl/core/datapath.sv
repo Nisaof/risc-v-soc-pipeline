@@ -383,17 +383,9 @@ always_ff @(posedge clk) begin
         end
         else if (pipe_id_ex_en) begin
             id_ex_valid         <= if_id_valid;
-        end
-
-        // Payload needs only the memory/MDU hold conditions. A flush or
-        // bubble may capture discarded decode data: valid is cleared above.
-        // Do not use pipe_id_ex_en here; its MDU override depends on redirect.
-        if (!pipe_mem_busy && !pipe_mdu_stall) begin
             id_ex_instruction   <= if_id_instruction;
             id_ex_pc            <= if_id_pc;
             id_ex_pc_plus4      <= if_id_pc_plus4;
-            id_ex_rs1_data <= id_rs1_data;
-            id_ex_rs2_data <= id_rs2_data;
             id_ex_imm           <= imm;
             id_ex_rs1           <= rs1;
             id_ex_rs2           <= rs2;
@@ -414,6 +406,11 @@ always_ff @(posedge clk) begin
             id_ex_csr_op      <= dec_csr_op;
             id_ex_csr_use_imm <= dec_csr_use_imm;
             id_ex_illegal_instruction <= dec_illegal_instruction;
+        end
+
+        if (!pipe_mem_busy && !pipe_mdu_stall) begin
+            id_ex_rs1_data <= id_rs1_data;
+            id_ex_rs2_data <= id_rs2_data;
         end
     end
 

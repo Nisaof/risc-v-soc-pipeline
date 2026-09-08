@@ -1,13 +1,10 @@
 // ============================================================
 // Module  : nexys_a7_top
 // Purpose : Board-level top wrapper for the Nexys A7-100T.
-//           Inverts the active-LOW CPU_RESETN button to the
-//           soc_top's active-LOW rst_n, runs the deassertion
-//           edge through a 2-FF synchronizer to remove
-//           metastability on rst_n release.
-//           Drives the SoC directly from the board's 100 MHz
-//           oscillator (the 50 MHz workaround is removed now
-//           that the MDU multiplier path is pipelined).
+//           Generates the 90 MHz SoC clock from the board's
+//           100 MHz oscillator with an MMCM. Holds the SoC in
+//           reset until the MMCM is locked, then synchronously
+//           deasserts reset in the generated clock domain.
 //           Routes spi_sck through STARTUPE2 to reach CCLK —
 //           the only way to drive the on-board flash clock on
 //           Artix-7 after configuration is complete.
@@ -45,20 +42,70 @@ module nexys_a7_top (
 );
 
     // --------------------------------------------------------
+    // 90 MHz SoC clock: 100 MHz * 9 / 10
+    // --------------------------------------------------------
+    logic soc_clk_unbuffered;
+    logic soc_clk;
+    logic clkfb_unbuffered;
+    logic clkfb_buffered;
+    logic mmcm_locked;
+
+    MMCME2_BASE #(
+        .BANDWIDTH          ("OPTIMIZED"),
+        .CLKIN1_PERIOD      (10.000),
+        .DIVCLK_DIVIDE      (1),
+        .CLKFBOUT_MULT_F    (9.000),
+        .CLKOUT0_DIVIDE_F   (10.000),
+        .CLKOUT0_PHASE      (0.000),
+        .CLKOUT0_DUTY_CYCLE (0.500)
+    ) u_soc_mmcm (
+        .CLKIN1   (clk_100mhz),
+        .CLKFBIN  (clkfb_buffered),
+        .RST      (board_rst_async),
+        .PWRDWN   (1'b0),
+        .CLKFBOUT (clkfb_unbuffered),
+        .CLKFBOUTB(),
+        .CLKOUT0  (soc_clk_unbuffered),
+        .CLKOUT0B (),
+        .CLKOUT1  (),
+        .CLKOUT1B (),
+        .CLKOUT2  (),
+        .CLKOUT2B (),
+        .CLKOUT3  (),
+        .CLKOUT3B (),
+        .CLKOUT4  (),
+        .CLKOUT5  (),
+        .CLKOUT6  (),
+        .LOCKED   (mmcm_locked)
+    );
+
+    BUFG u_soc_clk_bufg (
+        .I (soc_clk_unbuffered),
+        .O (soc_clk)
+    );
+
+    BUFG u_soc_clkfb_bufg (
+        .I (clkfb_unbuffered),
+        .O (clkfb_buffered)
+    );
+
+    // --------------------------------------------------------
     // Reset synchronizer
     //   - Asynchronous assertion (the moment the button is
     //     pressed the system enters reset).
     //   - Synchronous deassertion through two flops to
     //     prevent metastability when the button is released.
     // --------------------------------------------------------
-    logic       rst_async;
+    logic       board_rst_async;
+    logic       soc_rst_async;
     logic [1:0] rst_sync_ff;
     logic       rst_n;
 
-    assign rst_async = ~cpu_rst_btn;  // CPU_RESETN is active-LOW
+    assign board_rst_async = ~cpu_rst_btn;  // CPU_RESETN is active-LOW
+    assign soc_rst_async   = board_rst_async || !mmcm_locked;
 
-    always_ff @(posedge clk_100mhz or posedge rst_async) begin
-        if (rst_async)
+    always_ff @(posedge soc_clk or posedge soc_rst_async) begin
+        if (soc_rst_async)
             rst_sync_ff <= 2'b00;
         else
             rst_sync_ff <= {rst_sync_ff[0], 1'b1};
@@ -101,10 +148,10 @@ module nexys_a7_top (
     // --------------------------------------------------------
     soc_top #(
         .IMEM_FILE     ("bootloader.mem"),
-        .UART_CLK_FREQ (100_000_000),
+        .UART_CLK_FREQ (90_000_000),
         .PC_RESET      (32'h00007800)
     ) u_soc (
-        .clk_100mhz  (clk_100mhz),
+        .clk_100mhz  (soc_clk),
         .rst_n       (rst_n),
         .uart_tx     (uart_tx),
         .uart_rx     (uart_rx),

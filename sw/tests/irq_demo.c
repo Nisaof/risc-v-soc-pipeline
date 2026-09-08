@@ -7,7 +7,7 @@
 //        updates 7-segment display with counter value.
 // - Main loop: echoes received UART bytes back to sender.
 //
-// Hardware (100 MHz): TIMER_INTERVAL = 50000000  → 0.5 s
+// Hardware (90 MHz): TIMER_INTERVAL = 45000000  → 0.5 s
 // Simulation:         compile with -DSIM_MODE for short interval
 //
 // Build (hardware) : make compile_irq_demo
@@ -22,7 +22,7 @@
 #ifdef SIM_MODE
 #define TIMER_INTERVAL  500U        /* short interval for fast simulation */
 #else
-#define TIMER_INTERVAL  50000000U   /* 0.5 s at 100 MHz */
+#define TIMER_INTERVAL  45000000U   /* 0.5 s at 90 MHz */
 #endif
 
 #define LED_IRQ_BIT  (1u << 15)     /* LED[15] toggles on each timer ISR */
@@ -70,7 +70,7 @@ int main(void)
 #ifdef SIM_MODE
     uart_str("500");
 #else
-    uart_str("50000000");
+    uart_str("45000000");
 #endif
     uart_str(" clocks. Type to echo.\r\n");
 

@@ -12,7 +12,7 @@ module soc_top #(
     parameter int          UART_BAUD_RATE = 115_200,
     parameter logic [31:0] PC_RESET       = 32'h0000_0000
 ) (
-    // Nexys A7 100MHz system clock
+    // SoC-domain clock input. The FPGA top drives this legacy-named port at 90 MHz.
     input  logic        clk_100mhz,
 
     // Nexys A7 CPU reset button (active low)

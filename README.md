@@ -2,9 +2,9 @@
 
 A custom RISC-V System-on-Chip implemented in SystemVerilog and verified on the
 Digilent Nexys A7-100T (Artix-7). The CPU implements **RV32IM** — the full base
-integer ISA plus the multiply/divide extension — as a multi-cycle finite-state
-machine with machine-mode exception handling, CSR support, and a complete
-bare-metal software stack.
+integer ISA plus the multiply/divide extension — in a five-stage pipeline with
+forwarding, hazard handling, precise machine-mode exceptions, CSR support, and
+a complete bare-metal software stack.
 
 ---
 
@@ -18,6 +18,14 @@ bare-metal software stack.
 - **UART bootloader** — upload new programs over serial without re-synthesizing
 - **47 official RISC-V tests** passing (39 rv32ui + 8 rv32um)
 - **Full testbench suite** — 20+ simulation targets, SVA properties, integration tests
+
+### Validated FPGA result
+
+- **Nexys A7-100T / xc7a100tcsg324-1** — fully routed at a real 90 MHz internal SoC clock generated from the 100 MHz board oscillator
+- **Timing closed** — WNS +0.085 ns, TNS 0, WHS +0.110 ns, with zero setup or hold failures
+- **Physical peripherals verified** — UART TX/RX, GPIO LEDs/switches/buttons, eight-digit seven-segment display, polling timer, and timer interrupts
+- **Persistent applications verified** — UART upload, reserved SPI-flash save/load, reset reload, and real power-cycle retention
+- **Physical benchmark** — checksum `0x1405C478`, 106052 cycles, 39030 instructions, CPI 2.7, and 33.1 MIPS at 90 MHz
 
 ---
 
@@ -122,7 +130,7 @@ make compile_calculator
 make sim_calculator
 
 # Upload to hardware over UART (board must be running the bootloader)
-python3 scripts/uart_upload.py sw/tests/calculator.bin /dev/ttyUSB0
+python3 scripts/uart_upload.py /dev/ttyUSB0 sw/tests/calculator.bin
 ```
 
 ### Write your own program
@@ -138,29 +146,21 @@ python3 scripts/uart_upload.py sw/tests/calculator.bin /dev/ttyUSB0
 
 ### CPU Core
 
-The CPU is a **non-pipelined multi-cycle FSM** running at 100 MHz on the Nexys A7.
+The CPU is a **five-stage IF/ID/EX/MEM/WB pipeline**. On the Nexys A7, the board's
+100 MHz oscillator feeds an MMCM that generates the timing-closed 90 MHz SoC clock.
 
 ```
-FETCH → DECODE → EXECUTE → [MEMORY] → [MEMORY2] → WRITEBACK → [TRAP]
+IF → ID → EX → MEM → WB
 ```
 
-`MEMORY2` handles cross-boundary misaligned loads and stores in hardware.
-`TRAP` saves PC and cause to CSRs and jumps to MTVEC on any exception or interrupt.
-
-**Cycles per instruction class:**
-
-| Instruction class | Cycles |
-|-------------------|--------|
-| Branch (taken or not) | 3 |
-| Store (aligned) | 4 |
-| ALU-R, ALU-I, LUI, AUIPC, JAL, JALR, CSR | 4 |
-| Load (aligned) | 5 |
-| Load/store (cross-boundary misaligned) | 6 / 5 |
-| MUL, MULH, MULHSU, MULHU | 7 |
-| DIV, DIVU, REM, REMU | 38 |
+Forwarding and interlock logic resolve data hazards; memory and MDU busy conditions
+stall the pipeline when necessary. Cross-boundary misaligned loads and stores are
+handled in hardware. Precise trap control suppresses the faulting instruction,
+flushes younger work, updates MEPC/MCAUSE/MTVAL, and redirects to MTVEC. MRET and
+machine-timer interrupts are supported.
 
 **Benchmark result** (1000 iterations of add + mul + divu + branch):
-`206 124 cycles · 39 030 instructions · CPI = 5.2 · 18.9 MIPS @ 100 MHz`
+`106052 cycles · 39030 instructions · CPI = 2.7 · 33.1 MIPS @ 90 MHz`
 
 ### SoC Structure
 
@@ -168,9 +168,9 @@ FETCH → DECODE → EXECUTE → [MEMORY] → [MEMORY2] → WRITEBACK → [TRAP]
 nexys_a7_top (FPGA top — 2-FF reset synchronizer)
 └── soc_top
     ├── cpu
-    │   ├── control_unit   — multi-cycle FSM, exception/interrupt control
-    │   └── datapath       — PC, register file, ALU, MDU, CSR file, immediate gen
-    ├── imem  0x00000000   32 KB  instruction ROM (bootloader lives in top 1 KB)
+    │   ├── control_unit   — instruction control decoding
+    │   └── datapath       — five-stage pipeline, forwarding, hazards, ALU, MDU, CSRs
+    ├── imem  0x00000000   32 KB  instruction memory (bootloader lives in top 2 KB)
     ├── dmem  0x20000000   32 KB  data RAM / stack
     ├── uart  0x40000000    4 KB  serial (115 200 baud default)
     ├── timer 0x40001000    4 KB  32-bit compare timer + machine timer IRQ
@@ -270,7 +270,7 @@ make compile_soc_diag     # Full-SoC diagnostic (soc_diag.c)
 make compile_calculator   # Interactive calculator demo
 make compile_benchmark    # Performance benchmark
 make compile_irq_demo     # Timer interrupt demo (hardware build, 0.5 s interval)
-make compile_bootloader   # UART bootloader image (baked into IMEM top 1 KB)
+make compile_bootloader   # UART bootloader image (baked into IMEM top 2 KB)
 ```
 
 Compiled `.mem` files are loaded into `imem` at simulation time via `$readmemh`.
@@ -290,7 +290,7 @@ Compiled `.mem` files are loaded into `imem` at simulation time via `$readmemh`.
 > The FPGA must be live (JTAG-programmed first) before programming the SPI flash,
 > because Vivado uses the live FPGA as a proxy to reach the flash chip.
 
-### Fast firmware update (no re-synthesis)
+### Bitstream memory patching
 
 After a full synthesis run exists in `impl_1/`:
 
@@ -298,23 +298,30 @@ After a full synthesis run exists in `impl_1/`:
 # Source Vivado tools first (WSL):
 source /mnt/c/Xilinx/Vivado/2025.2/settings64.sh
 
-# Patch the bitstream with new firmware (takes ~5 seconds):
+# Patch address-zero IMEM contents in an existing bitstream:
 make update_bitstream PROG=sw/tests/calculator.elf
 # → produces nexys_a7_top_updated.bit
-# Then reprogram via Vivado Hardware Manager
 ```
+
+The shipping FPGA top resets at the bootloader entry (`0x7800`). Therefore an
+address-zero application patched this way is not entered directly: the bootloader
+still runs first and may restore the saved SPI image. Use the UART bootloader for
+normal application updates unless intentionally building a different reset-vector
+configuration.
 
 ### UART bootloader (no Vivado needed)
 
 Once the bootloader bitstream is in flash:
 ```bash
 make compile_irq_demo          # or any other firmware
-python3 scripts/uart_upload.py sw/tests/irq_demo.bin /dev/ttyUSB0
+python3 scripts/uart_upload.py /dev/ttyUSB0 sw/tests/irq_demo.bin
 # Press CPU reset — new program runs immediately
 ```
 
-The bootloader occupies the top 1 KB of IMEM (`0x7C00–0x7FFF`). Uploaded programs
-are written to `0x0000–0x7BFF` via the IMEM write window at `0x50000000`.
+The bootloader occupies the top 2 KB of IMEM (`0x7800–0x7FFF`). Uploaded programs
+are written to `0x0000–0x77FF` via the IMEM write window at `0x50000000`. Each
+successful UART upload is saved in the reserved application sector at SPI-flash
+address `0x00F00000`; hold BTNC during reset to force `BOOT` instead of `LOAD`.
 
 ---
 
@@ -366,7 +373,7 @@ risc-v-soc/
 ├── rtl/
 │   ├── core/
 │   │   ├── cpu.sv              — top-level CPU (connects control_unit + datapath)
-│   │   ├── control_unit.sv     — multi-cycle FSM, all control signals
+│   │   ├── control_unit.sv     — instruction control decoder
 │   │   ├── datapath.sv         — PC, register file, ALU, MDU, CSR file, mux network
 │   │   ├── csr_file.sv         — machine-mode CSRs (MSTATUS, MIE, MEPC, …, CYCLE)
 │   │   ├── mdu.sv              — multi-cycle multiply/divide unit (RV32M)

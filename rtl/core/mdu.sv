@@ -7,7 +7,7 @@
 //       S_IDLE    : latch pre-extended 64-bit operands (breaks
 //                   the timing-critical start→multiply path so
 //                   Vivado sees reg→DSP→reg in S_MUL_LOAD and
-//                   can close at 100 MHz on Artix-7).
+//                   supports timing closure on Artix-7).
 //       S_MUL_LOAD: compute 64-bit product from latched operands.
 //       S_MUL     : select and register the requested half.
 //       S_DONE    : assert done for one cycle.
@@ -185,7 +185,7 @@ module mdu (
                 // --------------------------------------------------
                 // S_MUL_LOAD: compute 64-bit product from registered
                 // operands.  The path is now reg→DSP→reg — Vivado
-                // can properly pipeline DSP48E1 blocks at 100 MHz.
+                // can properly pipeline DSP48E1 blocks for the target clock.
                 // --------------------------------------------------
                 S_MUL_LOAD: begin
                     mul_full <= $signed(mul_a_reg) * $signed(mul_b_reg);

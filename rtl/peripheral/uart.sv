@@ -4,7 +4,8 @@
 //           Baud rate configurable via parameter
 //           Connected to CPU via MMIO at 0x40000000
 // Parameters:
-//   CLK_FREQ  : system clock frequency in Hz (default 100MHz)
+//   CLK_FREQ  : system clock frequency in Hz (reusable default 100 MHz;
+//               nexys_a7_top overrides it with the 90 MHz SoC clock)
 //   BAUD_RATE : serial baud rate (default 115200)
 // ============================================================
 module uart #(
@@ -43,7 +44,7 @@ module uart #(
     logic        rx_sample;
 
     // Baud rate counter limit
-    localparam int BAUD_DIV = CLK_FREQ / BAUD_RATE;  // = 868 at 100MHz/115200
+    localparam int BAUD_DIV = CLK_FREQ / BAUD_RATE;
     localparam int BAUD_HALF_DIV = BAUD_DIV / 2;
 
     // TX state definitions

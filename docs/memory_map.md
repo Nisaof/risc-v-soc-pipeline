@@ -21,8 +21,8 @@ over serial and write it into IMEM without a bitstream rebuild.
 Bootloader layout within IMEM:
 | Words     | Byte range           | Contents                                   |
 |-----------|----------------------|--------------------------------------------|
-| 0–7935    | 0x0000–0x7BFF (31 KB)| User program (uploaded via UART)           |
-| 7936–8191 | 0x7C00–0x7FFF (1 KB) | Bootloader code (PC_RESET = 0x7C00)        |
+| 0–7679    | 0x0000–0x77FF (30 KB)| User program (uploaded via UART)           |
+| 7680–8191 | 0x7800–0x7FFF (2 KB) | Bootloader code (PC_RESET = 0x7800)        |
 
 ## MMIO Register Map
 

@@ -217,18 +217,23 @@ module tb_calculator;
         // -------------------------------------------------------
         uart_capture_ok = 1'b1;
 
-        // Press button then wait for leds as sync point; UART transmission
-        // starts shortly after leds change, so recv_uart_byte will catch it.
-        press_button(5'b00001, 300);  // BTNU = add
-        wait_leds(16'h000F, "ADD UART leds", 2000);
-
-        for (uart_i = 0; uart_i < 14; uart_i = uart_i + 1) begin
-            recv_uart_byte(uart_buf[uart_i], uart_ok, 500);
-            if (!uart_ok) begin
-                uart_capture_ok = 1'b0;
-                uart_i = 14;  // break
+        // Start capture before pressing the button so the receiver cannot
+        // miss the first UART start bit while press_button holds BTNU.
+        fork
+            begin
+                press_button(5'b00001, 300);  // BTNU = add
+                wait_leds(16'h000F, "ADD UART leds", 2000);
             end
-        end
+            begin
+                for (uart_i = 0; uart_i < 14; uart_i = uart_i + 1) begin
+                    recv_uart_byte(uart_buf[uart_i], uart_ok, 500);
+                    if (!uart_ok) begin
+                        uart_capture_ok = 1'b0;
+                        uart_i = 14;  // break
+                    end
+                end
+            end
+        join
 
         if (!uart_capture_ok) begin
             error_count++;

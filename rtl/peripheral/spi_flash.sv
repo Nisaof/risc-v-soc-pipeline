@@ -13,7 +13,7 @@
 //
 // SPI parameters:
 //   Mode 0 (CPOL=0, CPHA=0), MSB first.
-//   CLK_DIV = 4 → 8 system clocks per bit → 12.5 MHz at 100 MHz.
+//   CLK_DIV = 4 → 8 system clocks per bit → 11.25 MHz at the FPGA's 90 MHz SoC clock.
 //   Each byte transfer takes 64 system clock cycles.
 //
 // SCK note: spi_sck is a regular output port.  nexys_a7_top
